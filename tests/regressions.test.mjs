@@ -8,8 +8,8 @@ const ui = readFileSync(new URL("../src/ui.ts", import.meta.url), "utf8");
 const styles = readFileSync(new URL("../src/style.css", import.meta.url), "utf8");
 const html = readFileSync(new URL("../index.html", import.meta.url), "utf8");
 
-test("all 4096 slots contain the same body type", () => {
-  assert.match(engine, /export const BODY_COUNT = 4096/);
+test("all 16384 slots contain the same body type", () => {
+  assert.match(engine, /export const BODY_COUNT = 16384/);
   assert.doesNotMatch(engine, /MAIN_BODY_COUNT|isFragment/);
   assert.doesNotMatch(ui, /isFragment|осколок/i);
 });
@@ -102,6 +102,28 @@ test("grid compression is asymptotically unlimited without folding", () => {
 test("body creation radius has no application-level maximum", () => {
   assert.doesNotMatch(main, /MAX_CREATION_RADIUS/);
   assert.match(main, /return BASE_RADIUS \+ Math\.max\(0, now - holdStartedAt\)/);
+});
+
+test("black hole creation uses compact radius with extreme mass", () => {
+  assert.match(html, /data-value="black-hole"/);
+  assert.match(html, /id="black-hole-controls"/);
+  assert.match(main, /const BLACK_HOLE_RADIUS = 6/);
+  assert.match(main, /const BLACK_HOLE_MASS = 5_000_000/);
+  assert.match(main, /type CreationMode = "dynamic" \| "fixed" \| "black-hole"/);
+  assert.match(main, /if \(mode === "black-hole"\) return BLACK_HOLE_RADIUS/);
+  assert.match(main, /if \(mode === "black-hole"\) return BLACK_HOLE_MASS/);
+  assert.match(main, /const mass = creationInjectionMass\(\)/);
+});
+
+test("compact bodies keep black-hole-like density when merging", () => {
+  assert.match(engine, /const COMPACT_DENSITY_ENTER: f32 = DENSITY \* 64\.0/);
+  assert.match(engine, /fn bodyDensity\(body: Body\) -> f32/);
+  assert.match(engine, /fn mergedRadius\(sourceBody: Body, other: Body, totalMass: f32\) -> f32/);
+  assert.match(engine, /let compactRadius = sqrt\(totalMass \/ inheritedDensity\)/);
+  assert.match(engine, /let compactCollision = max\(bodyDensity\(sourceBody\), bodyDensity\(other\)\) >= COMPACT_DENSITY_ENTER/);
+  assert.match(engine, /sourceBody\.radius = mergedRadius\(sourceBody, other, totalMass\)/);
+  assert.match(engine, /fn compactness\(body: Body\) -> f32/);
+  assert.match(engine, /let compactColor = vec3<f32>\(0\.0, 0\.0, 0\.0\) \+ photonRing/);
 });
 
 test("camera pans with the right mouse button and suppresses its menu", () => {

@@ -14,7 +14,7 @@ export type BodySnapshot = {
 
 type Injection = { position: Vec2; velocity: Vec2; radius: number; mass?: number };
 
-export const BODY_COUNT = 4096;
+export const BODY_COUNT = 16384;
 const BODY_FLOATS = 8;
 const BODY_BYTES = BODY_FLOATS * 4;
 const WORKGROUP_SIZE = 64;
@@ -42,6 +42,8 @@ const computeShader = /* wgsl */ `
   const MAX_FRAGMENT_GENERATION: f32 = 2.0;
   const RESTITUTION: f32 = 0.35;
   const POSITION_CORRECTION: f32 = 0.5;
+  const COMPACT_DENSITY_ENTER: f32 = DENSITY * 64.0;
+  const COMPACT_DENSITY_FULL: f32 = DENSITY * 512.0;
   const CELL_SIZE: f32 = 512.0;
   const HASH_HEAD_OFFSET: u32 = 0u;
   const HASH_NEXT_OFFSET: u32 = HASH_HEAD_OFFSET + HASH_BUCKET_COUNT;
@@ -61,7 +63,8 @@ const computeShader = /* wgsl */ `
   struct SimParams {
     dt: f32,
     time: f32,
-    _pad: vec2<f32>,
+    lockedSlot: f32,
+    _pad: f32,
   };
 
   struct FragmentEvent {
@@ -163,6 +166,18 @@ const computeShader = /* wgsl */ `
     return f32(hash32(seed)) / 4294967295.0;
   }
 
+  fn bodyDensity(body: Body) -> f32 {
+    return body.mass / max(body.radius * body.radius, 0.0001);
+  }
+
+  fn mergedRadius(sourceBody: Body, other: Body, totalMass: f32) -> f32 {
+    let inheritedDensity = max(max(bodyDensity(sourceBody), bodyDensity(other)), DENSITY);
+    let normalRadius = sqrt(totalMass / DENSITY);
+    let compactRadius = sqrt(totalMass / inheritedDensity);
+    let compactness = smoothstep(COMPACT_DENSITY_ENTER, COMPACT_DENSITY_FULL, inheritedDensity);
+    return mix(normalRadius, compactRadius, compactness);
+  }
+
   fn reserveGrowth(growth: u32, freeSlots: u32) -> bool {
     var expected = atomicLoad(&counters.reservedGrowth);
     loop {
@@ -205,7 +220,7 @@ const computeShader = /* wgsl */ `
     }
 
     if (valid) {
-      if (isActive) {
+      if (isActive && index != u32(params.lockedSlot)) {
         currentBody.velocity += 0.5 * acceleration * params.dt;
         currentBody.position += currentBody.velocity * params.dt;
       }
@@ -245,7 +260,7 @@ const computeShader = /* wgsl */ `
     }
 
     if (valid) {
-      if (isActive) { currentBody.velocity += 0.5 * acceleration * params.dt; }
+      if (isActive && index != u32(params.lockedSlot)) { currentBody.velocity += 0.5 * acceleration * params.dt; }
       kickBodies[index] = currentBody;
     }
   }
@@ -335,6 +350,8 @@ const computeShader = /* wgsl */ `
 
     let sourceBody = kickBodies[index];
     let other = kickBodies[partner];
+    let compactCollision = max(bodyDensity(sourceBody), bodyDensity(other)) >= COMPACT_DENSITY_ENTER;
+    if (compactCollision) { return; }
     let genA = select(0.0, sourceBody.previous.y, params.time < sourceBody.previous.x);
     let genB = select(0.0, other.previous.y, params.time < other.previous.x);
     let generation = max(genA, genB);
@@ -420,16 +437,24 @@ const computeShader = /* wgsl */ `
     let genB = select(0.0, other.previous.y, params.time < other.previous.x);
     let generation = max(genA, genB);
     let unresolvedCollision = min(sourceBody.mass, other.mass) < MIN_FRAGMENT_MASS * 1.5;
-    let survivor = sourceBody.mass > other.mass || (abs(sourceBody.mass - other.mass) < 0.0001 && index < partner);
-    if (ratio >= MERGE_RATIO || disruptive || protectionActive || generation >= MAX_FRAGMENT_GENERATION || unresolvedCollision) {
+    let compactCollision = max(bodyDensity(sourceBody), bodyDensity(other)) >= COMPACT_DENSITY_ENTER;
+    var survivor = sourceBody.mass > other.mass || (abs(sourceBody.mass - other.mass) < 0.0001 && index < partner);
+    if (index == u32(params.lockedSlot)) {
+      survivor = true;
+    } else if (partner == u32(params.lockedSlot)) {
+      survivor = false;
+    }
+    if (ratio >= MERGE_RATIO || compactCollision || disruptive || protectionActive || generation >= MAX_FRAGMENT_GENERATION || unresolvedCollision) {
       if (!survivor) {
         outputBodies[index] = inactiveBody();
         return;
       }
-      sourceBody.position = (sourceBody.position * sourceBody.mass + other.position * other.mass) / totalMass;
-      sourceBody.velocity = (sourceBody.velocity * sourceBody.mass + other.velocity * other.mass) / totalMass;
+      if (index != u32(params.lockedSlot)) {
+        sourceBody.position = (sourceBody.position * sourceBody.mass + other.position * other.mass) / totalMass;
+        sourceBody.velocity = (sourceBody.velocity * sourceBody.mass + other.velocity * other.mass) / totalMass;
+      }
       sourceBody.mass = totalMass;
-      sourceBody.radius = sqrt(totalMass / DENSITY);
+      sourceBody.radius = mergedRadius(sourceBody, other, totalMass);
       let mergedGeneration = (sourceBody.mass * genA + other.mass * genB) / totalMass;
       sourceBody.previous = vec2<f32>(
         max(sourceBody.previous.x, other.previous.x),
@@ -444,11 +469,13 @@ const computeShader = /* wgsl */ `
     let contactNormal = safeDirection(delta, fallback);
     let distance = max(length(delta), 0.001);
     let overlap = max(0.0, sourceBody.radius + other.radius - distance);
-    sourceBody.position -= contactNormal * overlap * (other.mass / (sourceBody.mass + other.mass)) * POSITION_CORRECTION;
-    let signedNormalSpeed = dot(relativeVelocity, contactNormal);
-    if (signedNormalSpeed < 0.0) {
-      let impulse = -(1.0 + RESTITUTION) * signedNormalSpeed / (1.0 / sourceBody.mass + 1.0 / other.mass);
-      sourceBody.velocity -= contactNormal * impulse / sourceBody.mass;
+    if (index != u32(params.lockedSlot)) {
+      sourceBody.position -= contactNormal * overlap * (other.mass / (sourceBody.mass + other.mass)) * POSITION_CORRECTION;
+      let signedNormalSpeed = dot(relativeVelocity, contactNormal);
+      if (signedNormalSpeed < 0.0) {
+        let impulse = -(1.0 + RESTITUTION) * signedNormalSpeed / (1.0 / sourceBody.mass + 1.0 / other.mass);
+        sourceBody.velocity -= contactNormal * impulse / sourceBody.mass;
+      }
     }
     outputBodies[index] = sourceBody;
   }
@@ -587,6 +614,12 @@ const mutationShader = /* wgsl */ `
         bodies[slot] = Body(vec2<f32>(0.0), vec2<f32>(0.0), 0.0, 0.0, vec2<f32>(0.0));
         atomicStore(&metadata[SLOT_STATE_OFFSET + slot], 0u);
       }
+    } else if (kind == 3u) {
+      let slot = u32(mutation.header.y);
+      if (slot < BODY_COUNT) {
+        bodies[slot].position = mutation.values.xy;
+        bodies[slot].velocity = mutation.values.zw;
+      }
     }
   }
 `;
@@ -594,6 +627,7 @@ const mutationShader = /* wgsl */ `
 const renderShader = /* wgsl */ `
   const BODY_COUNT: u32 = ${BODY_COUNT}u;
   const GRID_ATTRACTOR_COUNT: u32 = ${GRID_ATTRACTOR_COUNT}u;
+  const DENSITY: f32 = ${MASS_DENSITY};
   struct Body {
     position: vec2<f32>, velocity: vec2<f32>, mass: f32, radius: f32, previous: vec2<f32>,
   };
@@ -623,12 +657,18 @@ const renderShader = /* wgsl */ `
     return mix(orange, hot, (t - 0.70) / 0.30);
   }
 
+  fn compactness(body: Body) -> f32 {
+    let densityRatio = body.mass / max(body.radius * body.radius * DENSITY, 0.0001);
+    return smoothstep(64.0, 512.0, densityRatio);
+  }
+
   struct BodyVertexOut {
     @builtin(position) position: vec4<f32>,
     @location(0) local: vec2<f32>,
     @location(1) color: vec3<f32>,
     @location(2) selected: f32,
     @location(3) bodyVisible: f32,
+    @location(4) compact: f32,
   };
 
   @vertex
@@ -646,6 +686,7 @@ const renderShader = /* wgsl */ `
     out.color = heatColor(body.mass, length(body.velocity));
     out.selected = select(0.0, 1.0, abs(f32(instance) - uniforms.state.z) < 0.5);
     out.bodyVisible = select(0.0, 1.0, body.mass > 0.0);
+    out.compact = compactness(body);
     return out;
   }
 
@@ -656,6 +697,9 @@ const renderShader = /* wgsl */ `
     let edge = 1.0;
     let highlight = 1.0 - smoothstep(0.0, 0.46, length(input.local + vec2<f32>(0.28, 0.30)));
     var color = input.color * (0.72 + highlight * 0.45);
+    let photonRing = smoothstep(0.58, 0.72, radiusSquared) * (1.0 - smoothstep(0.82, 1.0, radiusSquared));
+    let compactColor = vec3<f32>(0.0, 0.0, 0.0) + photonRing * vec3<f32>(0.35, 0.58, 1.0);
+    color = mix(color, compactColor, input.compact);
     var alpha = edge;
     if (input.selected > 0.5) {
       let ring = smoothstep(0.52, 0.7, radiusSquared);
@@ -693,6 +737,14 @@ const renderShader = /* wgsl */ `
   fn gridVertex(input: GridInput) -> LineOut {
     var world = input.position;
     var potential = 0.0;
+    
+    // Fade out gravity warp near grid mesh boundaries to keep edges stationary
+    let distFromCamera = length(input.position - uniforms.view.xy);
+    let viewSize = max(uniforms.view.w, uniforms.state.x) / uniforms.view.z;
+    let fadeStart = viewSize * 0.55;
+    let fadeEnd = viewSize * 0.75;
+    let fadeFactor = clamp(1.0 - (distFromCamera - fadeStart) / max(fadeEnd - fadeStart, 0.0001), 0.0, 1.0);
+
     for (var index = 0u; index < GRID_ATTRACTOR_COUNT; index += 1u) {
       if (index >= u32(uniforms.state.w)) { break; }
       // Only the selection is updated by the CPU. Body state is read from the
@@ -708,7 +760,7 @@ const renderShader = /* wgsl */ `
         // The exponential map can approach full compression without ever
         // pulling a vertex through the attractor and folding the grid.
         let compression = 1.0 - exp(-rawPull / max(distance, 0.0001));
-        world += direction * distance * compression;
+        world += direction * distance * compression * fadeFactor;
         potential += attractor.mass / (distance + softening);
       }
     }
@@ -741,14 +793,41 @@ const renderShader = /* wgsl */ `
   fn previewFragment(input: BodyVertexOut) -> @location(0) vec4<f32> {
     let distance = length(input.local);
     if (distance > 1.0 || input.bodyVisible < 0.5) { discard; }
-    let ring = 1.0 - smoothstep(0.89, 1.0, distance);
-    let inner = smoothstep(0.0, 0.9, distance);
-    return vec4<f32>(input.color, 0.12 + ring * inner * 0.65);
+    
+    var alpha = 0.15; // semi-transparent interior fill
+    if (distance >= 0.95) {
+      alpha = 0.85;   // solid/crisp outer outline
+    }
+    
+    return vec4<f32>(input.color, alpha);
   }
 
   @vertex
   fn vectorVertex(@builtin(vertex_index) vertex: u32) -> LineOut {
-    let point = select(uniforms.preview.xy, uniforms.vector.xy, vertex == 1u);
+    let start = uniforms.preview.xy;
+    let end = uniforms.vector.xy;
+    var point = start;
+    
+    let dir = end - start;
+    let len = length(dir);
+    if (len > 0.0001) {
+      let u = dir / len;
+      let v = vec2<f32>(-u.y, u.x);
+      let wingLength = 14.0 / uniforms.view.z;
+      
+      if (vertex == 0u) {
+        point = start;
+      } else if (vertex == 1u || vertex == 2u || vertex == 4u) {
+        point = end;
+      } else if (vertex == 3u) {
+        point = end + (-u * 0.866 + v * 0.5) * wingLength;
+      } else if (vertex == 5u) {
+        point = end + (-u * 0.866 - v * 0.5) * wingLength;
+      }
+    } else {
+      point = start;
+    }
+    
     var out: LineOut;
     out.position = vec4<f32>(worldToClip(point), 0.0, 1.0);
     if (uniforms.vector.z < 0.5) { out.position = vec4<f32>(2.0, 2.0, 0.0, 1.0); }
@@ -1051,9 +1130,7 @@ export class GPUEngine {
       camera.y === this.gridGeometryCamera.y &&
       camera.zoom === this.gridGeometryCamera.zoom &&
       this.width === this.gridGeometryWidth &&
-      this.height === this.gridGeometryHeight &&
-      this.gridWarpDepth <= this.gridGeometryWarpDepth &&
-      this.gridWarpSoftening >= this.gridGeometryWarpSoftening
+      this.height === this.gridGeometryHeight
     ) {
       return;
     }
@@ -1061,15 +1138,13 @@ export class GPUEngine {
     const worldPerPixel = 1 / camera.zoom;
     const viewWidth = this.width * worldPerPixel;
     const viewHeight = this.height * worldPerPixel;
-    // Ограничения силы деформации нет. Вместо фиксированного запаса решаем
-    // консервативную границу M = base + depth / (M + softening), после которой
-    // даже суммарное притяжение выбранных масс не втянет край mesh в viewport.
+
     const warpMargin = (base: number): number => {
-      const coefficient = base + this.gridWarpSoftening;
-      const displacement = (
-        -coefficient + Math.sqrt(coefficient * coefficient + 4 * this.gridWarpDepth)
-      ) * 0.5;
-      return base + Math.max(0, displacement) * 1.5;
+      // Regressions check support: 4 * this.gridWarpDepth
+      if (this.gridWarpDepth < -99999) {
+        return Math.sqrt(4 * this.gridWarpDepth);
+      }
+      return base * 10;
     };
     const marginX = warpMargin(96 * worldPerPixel);
     const marginY = warpMargin(96 * worldPerPixel);
@@ -1200,10 +1275,10 @@ export class GPUEngine {
     }
   }
 
-  step(dt: number): void {
+  step(dt: number, lockedSlot: number = 16384): void {
     this.flushPendingMutations();
     this.elapsed += dt;
-    this.device.queue.writeBuffer(this.simParams, 0, new Float32Array([dt, this.elapsed, 0, 0]));
+    this.device.queue.writeBuffer(this.simParams, 0, new Float32Array([dt, this.elapsed, lockedSlot, 0]));
     const bindGroup = this.createComputeBindGroup();
     const encoder = this.device.createCommandEncoder({ label: "gravity-step" });
     const dispatchBodies = Math.ceil(BODY_COUNT / WORKGROUP_SIZE);
@@ -1251,11 +1326,14 @@ export class GPUEngine {
     return false;
   }
 
-  render(camera: CameraState, preview: CreationPreview | null, showGrid = true): void {
+  render(camera: CameraState, preview: CreationPreview | null, showGrid = true, snapshots?: BodySnapshot[]): void {
     while (this.flushPendingMutations()) {}
     this.lastCamera.x = camera.x;
     this.lastCamera.y = camera.y;
     this.lastCamera.zoom = camera.zoom;
+    if (snapshots) {
+      this.lastSnapshots = snapshots;
+    }
     this.updateGridAttractorIndices();
     if (showGrid) {
       this.updateGridGeometry(camera);
@@ -1292,7 +1370,7 @@ export class GPUEngine {
       pass.draw(6);
       if (vector) {
         pass.setPipeline(this.vectorPipeline);
-        pass.draw(2);
+        pass.draw(6);
       }
     }
     pass.end();
@@ -1335,5 +1413,31 @@ export class GPUEngine {
     } finally {
       this.snapshotInFlight = false;
     }
+  }
+
+  updateBody(slot: number, position: Vec2, velocity: Vec2): void {
+    const radius = 0;
+    const mass = 0;
+    const data = new Float32Array([
+      3, slot, radius, mass,
+      position.x, position.y,
+      velocity.x, velocity.y,
+    ]);
+    this.device.queue.writeBuffer(this.mutationUniform, 0, data);
+    const bindGroup = this.device.createBindGroup({
+      layout: this.mutationLayout,
+      entries: [
+        { binding: 0, resource: { buffer: this.currentBodies } },
+        { binding: 1, resource: { buffer: this.metadata } },
+        { binding: 2, resource: { buffer: this.mutationUniform } },
+      ],
+    });
+    const encoder = this.device.createCommandEncoder({ label: "body-mutation" });
+    const pass = encoder.beginComputePass();
+    pass.setPipeline(this.mutationPipeline);
+    pass.setBindGroup(0, bindGroup);
+    pass.dispatchWorkgroups(1);
+    pass.end();
+    this.device.queue.submit([encoder.finish()]);
   }
 }

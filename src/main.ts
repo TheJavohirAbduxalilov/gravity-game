@@ -3,7 +3,8 @@ import { GPUEngine, type BodySnapshot, type CameraState, type CreationPreview, t
 import { BodiesSidebar } from "./ui";
 import { AudioManager } from "./audio";
 
-type InteractionMode = "idle" | "create" | "pan" | "select";
+type InteractionMode = "idle" | "create" | "pan" | "select" | "move-position";
+type CreationMode = "dynamic" | "fixed" | "black-hole";
 type CreationStyle = "growing" | "vector";
 
 const canvas = document.querySelector<HTMLCanvasElement>("#space-canvas")!;
@@ -24,6 +25,9 @@ const VELOCITY_SCALE = 0.7;
 const MIN_ZOOM = 0.01;
 const MAX_ZOOM = 50;
 
+const BLACK_HOLE_RADIUS = 6;
+const BLACK_HOLE_MASS = 5_000_000;
+
 let width = 1;
 let height = 1;
 let lastTime = performance.now();
@@ -35,13 +39,16 @@ let simTime = 0;
 let snapshotSimTime = 0;
 let snapshots: BodySnapshot[] = [];
 let interactionMode: InteractionMode = "idle";
-let activeTool: "create" | "select" = "create";
+let activeTool: "create" | "select" | "move" = "create"; // let activeTool: "create" | "select"
 let creationStyle: CreationStyle = "growing";
 let selectedId: number | null = null;
 let pointerId: number | null = null;
 let spacePressed = false;
 let holdStartedAt = 0;
 let frozenRadius = BASE_RADIUS;
+let draggedBodyId: number | null = null;
+let dragSamples: { time: number; pos: Vec2 }[] = [];
+let dragOffsetWorld: Vec2 = { x: 0, y: 0 };
 let dragStartScreen: Vec2 = { x: 0, y: 0 };
 let dragStartWorld: Vec2 = { x: 0, y: 0 };
 let dragCurrentWorld: Vec2 = { x: 0, y: 0 };
@@ -97,8 +104,10 @@ const overlayCanvas = document.querySelector<HTMLCanvasElement>("#overlay-canvas
 const overlayCtx = overlayCanvas.getContext("2d")!;
 const spawnModeSelect = document.querySelector<HTMLInputElement>("#creation-mode")!;
 const fixedControlsDiv = document.querySelector<HTMLElement>("#fixed-controls")!;
+const blackHoleControlsDiv = document.querySelector<HTMLElement>("#black-hole-controls")!;
 const spawnMassSlider = document.querySelector<HTMLInputElement>("#spawn-mass")!;
 const massPreview = document.querySelector<HTMLElement>("#mass-preview")!;
+const btnToolMove = document.querySelector<HTMLButtonElement>("#btn-tool-move")!;
 
 const segmentedButtons = document.querySelectorAll<HTMLButtonElement>("#creation-mode-segmented .segment-btn");
 segmentedButtons.forEach((btn) => {
@@ -112,8 +121,15 @@ segmentedButtons.forEach((btn) => {
 });
 
 spawnModeSelect.addEventListener("change", () => {
-  const isFixed = spawnModeSelect.value === "fixed";
-  fixedControlsDiv.style.display = isFixed ? "flex" : "none";
+  const mode = spawnModeSelect.value as CreationMode;
+  fixedControlsDiv.style.display = mode === "fixed" ? "flex" : "none";
+  if (blackHoleControlsDiv) {
+    if (mode === "black-hole") {
+      blackHoleControlsDiv.removeAttribute("hidden");
+    } else {
+      blackHoleControlsDiv.setAttribute("hidden", "");
+    }
+  }
 });
 
 function getSpawnMass(): number {
@@ -146,12 +162,21 @@ btnToolCreate.addEventListener("click", () => {
   activeTool = "create";
   btnToolCreate.classList.add("is-active");
   btnToolSelect.classList.remove("is-active");
+  btnToolMove.classList.remove("is-active");
 });
 
 btnToolSelect.addEventListener("click", () => {
   activeTool = "select";
   btnToolSelect.classList.add("is-active");
   btnToolCreate.classList.remove("is-active");
+  btnToolMove.classList.remove("is-active");
+});
+
+btnToolMove.addEventListener("click", () => {
+  activeTool = "move";
+  btnToolMove.classList.add("is-active");
+  btnToolCreate.classList.remove("is-active");
+  btnToolSelect.classList.remove("is-active");
 });
 
 timescaleDec.addEventListener("click", () => {
@@ -235,8 +260,7 @@ function worldToScreen(point: Vec2): Vec2 {
 }
 
 function drawOrbitPrediction(): void {
-  const isFixed = spawnModeSelect.value === "fixed";
-  const massVal = isFixed ? getSpawnMass() : (currentGrowthRadius() ** 2 * 0.15);
+  const massVal = creationInjectionMass() ?? (creationInjectionRadius() ** 2 * 0.15);
   const mult = settings.velocityInputMode === "opposite" ? -1 : 1;
   const velocity = creationStyle === "vector"
     ? {
@@ -354,6 +378,19 @@ function currentGrowthRadius(now = performance.now()): number {
   return BASE_RADIUS + Math.max(0, now - holdStartedAt) / 1000 * HOLD_GROWTH_RATE;
 }
 
+function creationInjectionRadius(now?: number): number {
+  const mode = spawnModeSelect.value as CreationMode;
+  if (mode === "black-hole") return BLACK_HOLE_RADIUS;
+  return currentGrowthRadius(now);
+}
+
+function creationInjectionMass(): number | undefined {
+  const mode = spawnModeSelect.value as CreationMode;
+  if (mode === "black-hole") return BLACK_HOLE_MASS;
+  const isFixed = mode === "fixed";
+  return isFixed ? getSpawnMass() : undefined;
+}
+
 function focusBody(id: number): void {
   lockedBodyId = id;
   selectBody(id);
@@ -373,9 +410,7 @@ function deleteBody(id: number): void {
   deletedByIds.add(id);
   if (selectedId === id) selectBody(null);
   engine.deleteBody(id);
-  if (isPaused) {
-    lastUiUpdate = 0;
-  }
+  lastUiUpdate = 0;
 }
 
 function renameBody(id: number, name: string): void {
@@ -399,7 +434,7 @@ function creationPreview(now: number): CreationPreview | null {
     : undefined;
   return {
     position: dragStartWorld,
-    radius: currentGrowthRadius(now),
+    radius: creationInjectionRadius(now),
     vectorEnd,
   };
 }
@@ -408,6 +443,8 @@ function endInteraction(): void {
   interactionMode = "idle";
   creationStyle = "growing";
   pointerId = null;
+  draggedBodyId = null;
+  dragSamples = [];
   canvas.classList.remove("is-aiming", "is-panning");
   canvas.classList.toggle("space-ready", spacePressed);
   audioManager.stopCreation(0);
@@ -437,6 +474,39 @@ canvas.addEventListener("pointerdown", (event) => {
     return;
   }
 
+  if (activeTool === "move") {
+    const screenPosition = pointerScreenPosition(event);
+    const startWorld = screenToWorld(screenPosition);
+    let closestBody: typeof snapshots[0] | null = null;
+    let minDistance = Infinity;
+    const clickThreshold = 18 / camera.zoom; // 18 pixels in world space
+
+    for (const body of snapshots) {
+      const dist = Math.hypot(body.position.x - startWorld.x, body.position.y - startWorld.y);
+      const hitRadius = Math.max(body.radius, clickThreshold);
+      if (dist <= hitRadius && dist < minDistance) {
+        minDistance = dist;
+        closestBody = body;
+      }
+    }
+
+    if (closestBody) {
+      interactionMode = "move-position";
+      draggedBodyId = closestBody.id;
+      dragOffsetWorld = {
+        x: closestBody.position.x - startWorld.x,
+        y: closestBody.position.y - startWorld.y,
+      };
+      dragCurrentWorld = { ...closestBody.position };
+      dragSamples = [{ time: performance.now(), pos: { ...closestBody.position } }];
+      engine.updateBody(draggedBodyId, closestBody.position, { x: 0, y: 0 });
+      lastUiUpdate = 0;
+    } else {
+      interactionMode = "idle";
+    }
+    return;
+  }
+
   interactionMode = "create";
   creationStyle = "growing";
   holdStartedAt = performance.now();
@@ -461,6 +531,22 @@ canvas.addEventListener("pointermove", (event) => {
   }
 
   if (interactionMode === "select") {
+    return;
+  }
+
+  if (interactionMode === "move-position" && draggedBodyId !== null) {
+    const startWorld = screenToWorld(screenPosition);
+    const newPos = {
+      x: startWorld.x + dragOffsetWorld.x,
+      y: startWorld.y + dragOffsetWorld.y,
+    };
+    engine.updateBody(draggedBodyId, newPos, { x: 0, y: 0 });
+    dragSamples.push({ time: performance.now(), pos: newPos });
+    const now = performance.now();
+    while (dragSamples.length > 2 && now - dragSamples[0].time > 150) {
+      dragSamples.shift();
+    }
+    dragCurrentWorld = newPos;
     return;
   }
 
@@ -504,6 +590,34 @@ canvas.addEventListener("pointerup", (event) => {
         selectBody(null);
       }
     }
+  } else if (interactionMode === "move-position" && draggedBodyId !== null) {
+    const now = performance.now();
+    while (dragSamples.length > 2 && now - dragSamples[0].time > 100) {
+      dragSamples.shift();
+    }
+
+    let throwVelocity = { x: 0, y: 0 };
+    if (dragSamples.length >= 2) {
+      const first = dragSamples[0];
+      const last = dragSamples[dragSamples.length - 1];
+      const dt = (last.time - first.time) / 1000;
+      if (dt > 0.001) {
+        const THROW_VELOCITY_SCALE = 0.4;
+        throwVelocity = {
+          x: ((last.pos.x - first.pos.x) / dt) * THROW_VELOCITY_SCALE,
+          y: ((last.pos.y - first.pos.y) / dt) * THROW_VELOCITY_SCALE,
+        };
+      }
+    }
+
+    const finalPos = dragSamples[dragSamples.length - 1]?.pos ?? dragStartWorld;
+    engine.updateBody(draggedBodyId, finalPos, throwVelocity);
+    
+    draggedBodyId = null;
+    dragSamples = [];
+    lastUiUpdate = 0;
+    endInteraction();
+    return;
   } else if (interactionMode === "create") {
     dragCurrentWorld = screenToWorld(pointerScreenPosition(event));
     const mult = settings.velocityInputMode === "opposite" ? -1 : 1;
@@ -513,13 +627,10 @@ canvas.addEventListener("pointerup", (event) => {
           y: (dragCurrentWorld.y - dragStartWorld.y) * VELOCITY_SCALE * mult,
         }
       : { x: 0, y: 0 };
-    const radius = currentGrowthRadius();
-    const isFixed = spawnModeSelect.value === "fixed";
-    const mass = isFixed ? getSpawnMass() : undefined;
+    const radius = creationInjectionRadius();
+    const mass = creationInjectionMass();
     engine.injectBody(dragStartWorld, velocity, radius, mass);
-    if (isPaused) {
-      lastUiUpdate = 0;
-    }
+    lastUiUpdate = 0;
 
     const speed = Math.hypot(velocity.x, velocity.y);
     audioManager.stopCreation(speed);
@@ -683,22 +794,7 @@ function drawSplineTrail(
       continue;
     }
 
-    // Check if the dot is covered/overlapped by any planet
-    let covered = false;
-    for (const b of snapshots) {
-      const bRad = b.radius * camera.zoom;
-      const bPos = worldToScreen(b.position);
-      const dx = sPos.x - bPos.x;
-      if (Math.abs(dx) >= bRad) continue;
-      const dy = sPos.y - bPos.y;
-      if (Math.abs(dy) >= bRad) continue;
 
-      if (dx * dx + dy * dy < (bRad - 0.5) * (bRad - 0.5)) {
-        covered = true;
-        break;
-      }
-    }
-    if (covered) continue;
 
     // t goes from 0.0 (tail) to 1.0 (head)
     const t = j / Math.max(1, numInterp - 1);
@@ -733,7 +829,7 @@ function frame(now: number): void {
     let substeps = 0;
     const maxSteps = Math.ceil(20 * timescale);
     while (accumulator >= FIXED_STEP && substeps < maxSteps) {
-      engine.step(FIXED_STEP);
+      engine.step(FIXED_STEP, draggedBodyId !== null ? draggedBodyId : 16384);
       simTime += FIXED_STEP;
       accumulator -= FIXED_STEP;
       substeps += 1;
@@ -849,7 +945,17 @@ function frame(now: number): void {
     lastUiUpdate = now;
   }
 
-  // Camera Lock logic
+  // 1. Calculate predictedSnapshots using CPU dead reckoning
+  // If a body is being dragged, update its position and zero velocity directly in the snapshots array
+  if (draggedBodyId !== null) {
+    const dragged = snapshots.find((b) => b.id === draggedBodyId);
+    if (dragged) {
+      dragged.position = { ...dragCurrentWorld };
+      dragged.velocity = { x: 0, y: 0 };
+    }
+  }
+
+  // Camera Lock logic using snapshots
   if (lockedBodyId !== null) {
     const locked = snapshots.find((b) => b.id === lockedBodyId);
     if (locked) {
@@ -863,48 +969,23 @@ function frame(now: number): void {
   
   overlayCtx.clearRect(0, 0, width, height);
 
-  // Draw smooth, tapered, and fading historical trails for active bodies on the overlay canvas
-  // Apply a 1-frame lead projection to compensate for asynchronous WebGPU compositing latency
   const leadTime = 0.0 * FIXED_STEP * timescale;
   const dt = simTime - snapshotSimTime + leadTime;
 
-  // 1. Render active trails
+  // 2. Render active trails using snapshots and O(1) linear prediction
   if (settings.showTrails) {
     for (const body of snapshots) {
       const history = bodyHistories.get(body.id);
       if (!history || history.length < 2) continue;
 
-      // Calculate gravitational acceleration on the CPU to dead-reckon curved orbits accurately
-      let ax = 0;
-      let ay = 0;
-      const G = 9500.0;
-      const SOFTENING = 12.0;
-      for (const att of snapshots) {
-        if (att.id === body.id || att.mass <= 0) continue;
-        const dx = att.position.x - body.position.x;
-        const dy = att.position.y - body.position.y;
-        const distSq = dx * dx + dy * dy + SOFTENING * SOFTENING;
-        const dist = Math.sqrt(distSq);
-        const pull = (G * att.mass) / (distSq * dist);
-        ax += dx * pull;
-        ay += dy * pull;
-      }
-
-      // Quadratic dead reckoning: position + velocity * dt + 0.5 * acceleration * dt^2
-      const estX = body.position.x + body.velocity.x * dt + 0.5 * ax * dt * dt;
-      const estY = body.position.y + body.velocity.y * dt + 0.5 * ay * dt * dt;
-      const estVel = {
-        x: body.velocity.x + ax * dt,
-        y: body.velocity.y + ay * dt
-      };
+      const estX = body.position.x + body.velocity.x * dt;
+      const estY = body.position.y + body.velocity.y * dt;
+      const estVel = body.velocity;
 
       const baseAlpha = body.mass > 1000 ? 0.70 : 0.45;
-
       drawSplineTrail(history, estX, estY, body.radius, body.mass, estVel, baseAlpha, 1.0);
     }
   }
-
-
 
   if (interactionMode === "create") {
     drawOrbitPrediction();
@@ -922,7 +1003,7 @@ function frame(now: number): void {
   }
   const renderCamera = { x: rx, y: ry, zoom: camera.zoom };
 
-  engine.render(renderCamera, creationPreview(now), settings.showGrid);
+  engine.render(renderCamera, creationPreview(now), settings.showGrid, snapshots);
   requestAnimationFrame(frame);
 }
 

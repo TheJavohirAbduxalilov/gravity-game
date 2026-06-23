@@ -551,6 +551,42 @@ button {
   color: var(--text-primary);
 }
 
+.creation-note {
+  padding: var(--space-2);
+  background: var(--bg-panel-2);
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-control);
+}
+
+.creation-note[hidden] {
+  display: none;
+}
+
+.note-title {
+  margin-bottom: var(--space-1);
+  color: var(--accent-strong);
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+}
+
+.note-row {
+  display: grid;
+  grid-template-columns: 1fr auto;
+  align-items: center;
+  min-height: 20px;
+  color: var(--text-secondary);
+  font-size: 11px;
+}
+
+.note-row strong {
+  color: var(--text-primary);
+  font-size: 11px;
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+}
+
 .slider-field {
   display: flex;
   flex-direction: column;

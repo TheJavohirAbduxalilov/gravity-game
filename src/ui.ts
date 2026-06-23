@@ -75,43 +75,10 @@ export class BodiesSidebar {
 
   update(bodies: BodySnapshot[]): void {
     this.lastSnapshots = bodies;
-    const query = this.searchQuery.toLowerCase().trim();
-    const filteredBodies = query
-      ? bodies.filter((body) => body.name.toLowerCase().includes(query))
-      : bodies;
-
-    const liveIds = new Set(filteredBodies.map((body) => body.id));
     const allLiveIds = new Set(bodies.map((body) => body.id));
-
-    // Удаляем карточки исчезнувших тел (слияние/удаление или отфильтрованных).
-    for (const [id, refs] of this.cards) {
-      if (!liveIds.has(id)) {
-        refs.card.remove();
-        this.cards.delete(id);
-        if (!allLiveIds.has(id)) {
-          this.favorites.delete(id);
-        }
-        if (this.selectedId === id && !allLiveIds.has(id)) {
-          this.selectedId = null;
-        }
-      }
+    if (this.selectedId !== null && !allLiveIds.has(this.selectedId)) {
+      this.selectedId = null;
     }
-
-    // Создаём недостающие карточки и обновляем только текстовые значения у
-    // существующих — без полной перерисовки DOM (список не дёргается).
-    for (const body of filteredBodies) {
-      let refs = this.cards.get(body.id);
-      if (!refs) {
-        refs = this.createCard(body);
-        this.cards.set(body.id, refs);
-        this.container.appendChild(refs.card);
-      }
-      this.updateValues(refs, body);
-    }
-
-    this.reorder();
-    this.applySelection();
-    this.empty.hidden = filteredBodies.length > 0;
     this.updateInspector(bodies);
   }
 
