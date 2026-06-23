@@ -126,8 +126,9 @@ const computeShader = /* wgsl */ `
   }
 
   fn disruptionThreshold(totalMass: f32) -> f32 {
-    // Larger aggregates need slightly more specific impact energy to disrupt.
-    return 0.125 * FRAGMENT_SPEED * FRAGMENT_SPEED * (1.0 + 0.06 * log2(1.0 + totalMass));
+    // Larger aggregates need significantly more specific impact energy to disrupt,
+    // scaling with square root of mass to approximate gravitational binding energy.
+    return 0.125 * FRAGMENT_SPEED * FRAGMENT_SPEED * (1.0 + 0.02 * sqrt(totalMass));
   }
 
   fn fragmentCount(
