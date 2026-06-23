@@ -285,6 +285,35 @@
       .settings-row {
         padding-top: 8px !important;
       }
+
+      /* Premium iOS-style toggle switches */
+      .switch {
+        width: 38px !important;
+        height: 20px !important;
+      }
+      .slider {
+        border-radius: 10px !important;
+        background-color: rgba(255, 255, 255, 0.08) !important;
+        border: 1px solid rgba(255, 255, 255, 0.1) !important;
+        transition: background-color 0.25s ease, border-color 0.25s ease !important;
+      }
+      .slider:before {
+        height: 14px !important;
+        width: 14px !important;
+        left: 2px !important;
+        bottom: 2px !important;
+        background-color: rgba(255, 255, 255, 0.75) !important;
+        border-radius: 50% !important;
+        transition: transform 0.25s cubic-bezier(0.4, 0, 0.2, 1), background-color 0.25s ease !important;
+      }
+      input:checked + .slider {
+        background-color: #3b82f6 !important;
+        border-color: #3b82f6 !important;
+      }
+      input:checked + .slider:before {
+        transform: translateX(18px) !important;
+        background-color: #ffffff !important;
+      }
     </style>
   </head>
   <body>
