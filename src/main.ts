@@ -85,6 +85,8 @@ const settingCollisionSounds = document.querySelector<HTMLInputElement>("#settin
 const settingShowTrails = document.querySelector<HTMLInputElement>("#setting-show-trails")!;
 const settingShowGrid = document.querySelector<HTMLInputElement>("#setting-show-grid")!;
 const settingVelocityMode = document.querySelector<HTMLSelectElement>("#setting-velocity-mode")!;
+const btnClearSimulation = document.querySelector<HTMLButtonElement>("#btn-clear-simulation")!;
+const ytProgressAccent = document.querySelector<HTMLElement>(".yt-progress-accent")!;
 
 const pauseButton = document.querySelector<HTMLButtonElement>("#pause-button")!;
 const pauseText = pauseButton.querySelector<HTMLElement>(".pause-text")!;
@@ -146,15 +148,59 @@ spawnMassSlider.addEventListener("input", () => {
   massPreview.textContent = getSpawnMass().toLocaleString("ru-RU");
 });
 
+function setupAutoRepeat(
+  btn: HTMLButtonElement,
+  onTrigger: () => void,
+  delayMs = 350,
+  intervalMs = 70
+): void {
+  let timeoutId: any = null;
+  let intervalId: any = null;
+
+  const triggerAction = () => {
+    onTrigger();
+  };
+
+  const start = (e: PointerEvent) => {
+    if (e.button !== 0) return;
+    e.preventDefault();
+    triggerAction();
+
+    stop();
+
+    timeoutId = setTimeout(() => {
+      intervalId = setInterval(() => {
+        triggerAction();
+      }, intervalMs);
+    }, delayMs);
+  };
+
+  const stop = () => {
+    if (timeoutId !== null) {
+      clearTimeout(timeoutId);
+      timeoutId = null;
+    }
+    if (intervalId !== null) {
+      clearInterval(intervalId);
+      intervalId = null;
+    }
+  };
+
+  btn.addEventListener("pointerdown", start);
+  btn.addEventListener("pointerup", stop);
+  btn.addEventListener("pointerleave", stop);
+  btn.addEventListener("pointercancel", stop);
+}
+
 const massDecBtn = document.querySelector<HTMLButtonElement>("#mass-dec");
 const massIncBtn = document.querySelector<HTMLButtonElement>("#mass-inc");
 if (massDecBtn && massIncBtn) {
-  massDecBtn.addEventListener("click", () => {
+  setupAutoRepeat(massDecBtn, () => {
     const val = parseInt(spawnMassSlider.value);
     spawnMassSlider.value = Math.max(1, val - 30).toString();
     spawnMassSlider.dispatchEvent(new Event("input"));
   });
-  massIncBtn.addEventListener("click", () => {
+  setupAutoRepeat(massIncBtn, () => {
     const val = parseInt(spawnMassSlider.value);
     spawnMassSlider.value = Math.min(1000, val + 30).toString();
     spawnMassSlider.dispatchEvent(new Event("input"));
@@ -171,6 +217,7 @@ pauseButton.addEventListener("click", () => {
   pauseButton.classList.toggle("is-active", isPaused);
   pauseText.textContent = isPaused ? "Продолжить" : "Пауза";
   pauseSvgPath.setAttribute("d", isPaused ? playIconPath : pauseIconPath);
+  ytProgressAccent.classList.toggle("is-paused", isPaused);
 });
 
 btnToolCreate.addEventListener("click", () => {
@@ -194,7 +241,7 @@ btnToolMove.addEventListener("click", () => {
   btnToolSelect.classList.remove("is-active");
 });
 
-timescaleDec.addEventListener("click", () => {
+setupAutoRepeat(timescaleDec, () => {
   if (timescale <= 1.05) {
     timescale = Math.max(0.1, timescale - 0.1);
   } else {
@@ -203,7 +250,7 @@ timescaleDec.addEventListener("click", () => {
   timescaleValueEl.textContent = `${timescale.toFixed(1)}x`;
 });
 
-timescaleInc.addEventListener("click", () => {
+setupAutoRepeat(timescaleInc, () => {
   if (timescale < 0.95) {
     timescale = Math.min(1.0, timescale + 0.1);
   } else {
@@ -212,14 +259,40 @@ timescaleInc.addEventListener("click", () => {
   timescaleValueEl.textContent = `${timescale.toFixed(1)}x`;
 });
 
-zoomDec.addEventListener("click", () => {
-  camera.zoom = Math.max(MIN_ZOOM, camera.zoom / 1.3);
+setupAutoRepeat(zoomDec, () => {
+  camera.zoom = Math.max(MIN_ZOOM, camera.zoom / 1.15);
   updateToolbarReadouts();
+}, 350, 45);
+
+setupAutoRepeat(zoomInc, () => {
+  camera.zoom = Math.min(MAX_ZOOM, camera.zoom * 1.15);
+  updateToolbarReadouts();
+}, 350, 45);
+
+// Instant Settings Update Listeners
+settingCameraShake.addEventListener("change", () => {
+  settings.cameraShake = settingCameraShake.checked;
+  localStorage.setItem("setting_camera_shake", String(settings.cameraShake));
 });
 
-zoomInc.addEventListener("click", () => {
-  camera.zoom = Math.min(MAX_ZOOM, camera.zoom * 1.3);
-  updateToolbarReadouts();
+settingCollisionSounds.addEventListener("change", () => {
+  settings.collisionSounds = settingCollisionSounds.checked;
+  localStorage.setItem("setting_collision_sounds", String(settings.collisionSounds));
+});
+
+settingShowTrails.addEventListener("change", () => {
+  settings.showTrails = settingShowTrails.checked;
+  localStorage.setItem("setting_show_trails", String(settings.showTrails));
+});
+
+settingShowGrid.addEventListener("change", () => {
+  settings.showGrid = settingShowGrid.checked;
+  localStorage.setItem("setting_show_grid", String(settings.showGrid));
+});
+
+settingVelocityMode.addEventListener("change", () => {
+  settings.velocityInputMode = settingVelocityMode.value;
+  localStorage.setItem("setting_velocity_input_mode", settings.velocityInputMode);
 });
 
 btnOpenSettings.addEventListener("click", () => {
@@ -241,19 +314,21 @@ const closeModal = () => {
 btnCloseModal.addEventListener("click", closeModal);
 
 btnSaveSettings.addEventListener("click", () => {
-  settings.cameraShake = settingCameraShake.checked;
-  settings.collisionSounds = settingCollisionSounds.checked;
-  settings.showTrails = settingShowTrails.checked;
-  settings.showGrid = settingShowGrid.checked;
-  settings.velocityInputMode = settingVelocityMode.value;
-  
-  localStorage.setItem("setting_camera_shake", String(settings.cameraShake));
-  localStorage.setItem("setting_collision_sounds", String(settings.collisionSounds));
-  localStorage.setItem("setting_show_trails", String(settings.showTrails));
-  localStorage.setItem("setting_show_grid", String(settings.showGrid));
-  localStorage.setItem("setting_velocity_input_mode", settings.velocityInputMode);
-  
   closeModal();
+});
+
+btnClearSimulation.addEventListener("click", () => {
+  if (confirm("Вы действительно хотите удалить все тела?")) {
+    for (let slot = 0; slot < 16384; slot++) {
+      engine.deleteBody(slot);
+    }
+    customNames.clear();
+    bodyHistories.clear();
+    deletedByIds.clear();
+    selectBody(null);
+    lastUiUpdate = 0;
+    closeModal();
+  }
 });
 
 settingsModal.addEventListener("click", (event) => {

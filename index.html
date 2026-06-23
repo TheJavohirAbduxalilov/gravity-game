@@ -30,13 +30,27 @@
         gap: 0 !important;
       }
 
-      /* YouTube-style Red Progress Accent */
+      /* YouTube-style Red Progress Accent with active flow animation */
       .yt-progress-accent {
         height: 3px !important;
-        background: #ff0000 !important;
+        background: linear-gradient(90deg, #cc0000 0%, #ff0000 50%, #cc0000 100%) !important;
+        background-size: 200% 100% !important;
         width: 100% !important;
         position: relative !important;
         box-shadow: 0 0 6px rgba(255, 0, 0, 0.8) !important;
+        animation: yt-flow 2s linear infinite !important;
+        transition: box-shadow 0.3s ease !important;
+      }
+      
+      .yt-progress-accent.is-paused {
+        background: #ff0000 !important;
+        box-shadow: none !important;
+        animation: none !important;
+      }
+
+      @keyframes yt-flow {
+        0% { background-position: 0% 0%; }
+        100% { background-position: -200% 0%; }
       }
 
       /* Controls Wrapper */
@@ -128,6 +142,124 @@
         background: rgba(255, 255, 255, 0.1) !important;
       }
 
+      /* Segmented mode switch styled like a modern glass pill container */
+      .creation-modes-container {
+        background: rgba(255, 255, 255, 0.04) !important;
+        backdrop-filter: blur(16px) !important;
+        -webkit-backdrop-filter: blur(16px) !important;
+        border: 1px solid rgba(255, 255, 255, 0.06) !important;
+        border-radius: 20px !important;
+        padding: 3px !important;
+        display: flex !important;
+        gap: 2px !important;
+      }
+
+      .creation-modes-container .segment-btn {
+        background: transparent !important;
+        border: none !important;
+        color: rgba(255, 255, 255, 0.6) !important;
+        padding: 6px 16px !important;
+        font-size: 13px !important;
+        font-weight: 500 !important;
+        cursor: pointer !important;
+        border-radius: 16px !important;
+        transition: all 0.25s cubic-bezier(0.4, 0, 0.2, 1) !important;
+        border-bottom: none !important;
+      }
+
+      .creation-modes-container .segment-btn:hover {
+        color: #ffffff !important;
+        background: rgba(255, 255, 255, 0.08) !important;
+      }
+
+      .creation-modes-container .segment-btn.is-active {
+        color: #08090d !important;
+        background: #ffffff !important;
+        font-weight: 600 !important;
+        box-shadow: 0 4px 12px rgba(0, 0, 0, 0.2) !important;
+        border-bottom: none !important;
+      }
+
+      /* Mass control glass container */
+      .mass-control-overlay {
+        background: rgba(255, 255, 255, 0.04) !important;
+        backdrop-filter: blur(16px) !important;
+        -webkit-backdrop-filter: blur(16px) !important;
+        border: 1px solid rgba(255, 255, 255, 0.06) !important;
+        border-radius: 20px !important;
+        padding: 4px 12px !important;
+        display: flex !important;
+        align-items: center !important;
+        gap: 8px !important;
+      }
+
+      .mass-adjust-btn {
+        background: rgba(255, 255, 255, 0.05) !important;
+        border: none !important;
+        color: rgba(255, 255, 255, 0.8) !important;
+        width: 26px !important;
+        height: 26px !important;
+        border-radius: 50% !important;
+        display: flex !important;
+        align-items: center !important;
+        justify-content: center !important;
+        cursor: pointer !important;
+        font-size: 15px !important;
+        font-weight: 500 !important;
+        transition: all 0.2s ease !important;
+      }
+
+      .mass-adjust-btn:hover {
+        background: rgba(255, 255, 255, 0.15) !important;
+        color: #ffffff !important;
+        transform: scale(1.05) !important;
+      }
+
+      .mass-adjust-btn:active {
+        transform: scale(0.95) !important;
+      }
+
+      .mass-display {
+        color: #ffffff !important;
+        font-size: 13px !important;
+        font-weight: 600 !important;
+        min-width: 90px !important;
+        text-align: center !important;
+        font-family: 'Outfit', 'Inter', sans-serif !important;
+      }
+
+      .creation-note-overlay {
+        background: rgba(255, 255, 255, 0.04) !important;
+        backdrop-filter: blur(16px) !important;
+        -webkit-backdrop-filter: blur(16px) !important;
+        border: 1px solid rgba(255, 255, 255, 0.06) !important;
+        border-radius: 20px !important;
+        padding: 6px 14px !important;
+        color: rgba(255, 255, 255, 0.7) !important;
+        font-size: 12px !important;
+        font-weight: 500;
+      }
+
+      .btn-danger-flat {
+        background: rgba(239, 68, 68, 0.1) !important;
+        color: #ef4444 !important;
+        border: 1px solid rgba(239, 68, 68, 0.2) !important;
+        padding: 6px 14px !important;
+        border-radius: 6px !important;
+        font-size: 12px !important;
+        font-weight: 500 !important;
+        cursor: pointer !important;
+        transition: all 0.2s ease !important;
+      }
+      .btn-danger-flat:hover {
+        background: rgba(239, 68, 68, 0.2) !important;
+        border-color: #ef4444 !important;
+        box-shadow: 0 0 12px rgba(239, 68, 68, 0.2) !important;
+      }
+      .btn-danger-flat:active {
+        transform: scale(0.95) !important;
+      }
+
       /* Modal glass theme & borderless */
       .modal-backdrop {
         background: rgba(0, 0, 0, 0.4) !important;
@@ -152,9 +284,6 @@
       }
       .settings-row {
         padding-top: 8px !important;
-      }
-      .creation-modes-container .segment-btn.is-active {
-        text-shadow: 0 0 8px rgba(255, 255, 255, 0.5) !important;
       }
     </style>
   </head>
@@ -317,6 +446,14 @@
                 <option value="direct">В сторону мыши</option>
               </select>
             </div>
+          </div>
+
+          <div class="settings-row">
+            <div class="settings-info">
+              <div class="settings-label">Сброс симуляции</div>
+              <div class="settings-desc">Удалить все небесные тела из космического пространства.</div>
+            </div>
+            <button class="btn-danger-flat" id="btn-clear-simulation" type="button">Очистить всё</button>
           </div>
         </div>
         <div class="modal-footer">
