@@ -81,10 +81,21 @@ const bodiesCountEl = document.querySelector<HTMLElement>("#bodies-count")!;
 
 const overlayCanvas = document.querySelector<HTMLCanvasElement>("#overlay-canvas")!;
 const overlayCtx = overlayCanvas.getContext("2d")!;
-const spawnModeSelect = document.querySelector<HTMLSelectElement>("#creation-mode")!;
+const spawnModeSelect = document.querySelector<HTMLInputElement>("#creation-mode")!;
 const fixedControlsDiv = document.querySelector<HTMLElement>("#fixed-controls")!;
 const spawnMassSlider = document.querySelector<HTMLInputElement>("#spawn-mass")!;
 const massPreview = document.querySelector<HTMLElement>("#mass-preview")!;
+
+const segmentedButtons = document.querySelectorAll<HTMLButtonElement>("#creation-mode-segmented .segment-btn");
+segmentedButtons.forEach((btn) => {
+  btn.addEventListener("click", () => {
+    segmentedButtons.forEach((b) => b.classList.remove("is-active"));
+    btn.classList.add("is-active");
+    const val = btn.getAttribute("data-value")!;
+    spawnModeSelect.value = val;
+    spawnModeSelect.dispatchEvent(new Event("change"));
+  });
+});
 
 spawnModeSelect.addEventListener("change", () => {
   const isFixed = spawnModeSelect.value === "fixed";

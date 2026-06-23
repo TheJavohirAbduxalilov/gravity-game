@@ -92,11 +92,12 @@
         <h2 class="sidebar-title">Создание тел</h2>
         
         <div class="control-group">
-          <label for="creation-mode">Режим создания</label>
-          <select id="creation-mode">
-            <option value="dynamic">Динамический рост</option>
-            <option value="fixed">Фиксированные слайдеры</option>
-          </select>
+          <label>Режим создания</label>
+          <div class="segmented-control" id="creation-mode-segmented">
+            <button type="button" class="segment-btn is-active" data-value="dynamic" title="Динамический рост">Динамический</button>
+            <button type="button" class="segment-btn" data-value="fixed" title="Фиксированные слайдеры">Фиксированный</button>
+          </div>
+          <input type="hidden" id="creation-mode" value="dynamic">
         </div>
  
         <div class="control-group" id="fixed-controls" style="display: none;">

@@ -729,3 +729,35 @@ input[type="range"]::-moz-range-thumb {
     display: none;
   }
 }
+
+.segmented-control {
+  display: flex;
+  background: var(--bg-control);
+  border: 1px solid var(--border-subtle);
+  border-radius: 2px;
+  padding: 2px;
+  width: 100%;
+}
+
+.segment-btn {
+  flex: 1;
+  text-align: center;
+  padding: 5px 8px;
+  font-size: 11px;
+  font-weight: 500;
+  color: var(--text-muted);
+  cursor: pointer;
+  border-radius: 1px;
+  background: transparent;
+  transition: color 0.1s, background-color 0.1s;
+}
+
+.segment-btn:hover {
+  color: var(--text-primary);
+  background: rgba(255, 255, 255, 0.03);
+}
+
+.segment-btn.is-active {
+  color: var(--text-primary);
+  background: var(--border-strong);
+}
