@@ -446,22 +446,44 @@ button {
   border-bottom: 1px solid var(--border-subtle);
 }
 
-.command-group,
+.command-bar-left,
+.command-bar-center,
+.command-bar-right {
+  flex: 1;
+  display: flex;
+  align-items: center;
+}
+
+.command-bar-left {
+  justify-content: flex-start;
+}
+
+.command-bar-center {
+  justify-content: center;
+}
+
+.command-bar-right {
+  justify-content: flex-end;
+}
+
+.command-group {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-2);
+  min-height: 24px;
+}
+
+.command-group-divider {
+  width: 1px;
+  height: 14px;
+  background: var(--border-subtle);
+  margin: 0 var(--space-2);
+}
+
 .command-readout {
   display: inline-flex;
   align-items: center;
   gap: var(--space-1);
-  min-height: 24px;
-  padding-right: var(--space-2);
-  border-right: 1px solid var(--border-subtle);
-}
-
-.command-readout {
-  border-right: 0;
-}
-
-.command-spacer {
-  flex: 1;
 }
 
 .command-tools {
