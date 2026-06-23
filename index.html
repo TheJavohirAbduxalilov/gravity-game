@@ -7,13 +7,42 @@
     <title>Гравитационная симуляция</title>
     <!-- Test compatibility: Статус системы -->
     <style>
+      /* Minimalist, borderless, transparent aesthetics overrides */
       .command-bar {
-        background: rgba(8, 9, 13, 0.45) !important;
-        backdrop-filter: blur(16px) !important;
-        -webkit-backdrop-filter: blur(16px) !important;
-        border: 1px solid rgba(255, 255, 255, 0.08) !important;
+        background: rgba(0, 0, 0, 0.25) !important;
+        backdrop-filter: blur(20px) !important;
+        -webkit-backdrop-filter: blur(20px) !important;
+        border: none !important;
+        box-shadow: none !important;
+      }
+      .command-group-divider {
+        display: none !important;
+      }
+
+      /* Modal glass theme & borderless */
+      .modal-backdrop {
+        background: rgba(0, 0, 0, 0.4) !important;
+        backdrop-filter: blur(12px) !important;
+        -webkit-backdrop-filter: blur(12px) !important;
+      }
+      .modal-content {
+        background: rgba(8, 9, 13, 0.55) !important;
+        backdrop-filter: blur(24px) !important;
+        -webkit-backdrop-filter: blur(24px) !important;
+        border: 1px solid rgba(255, 255, 255, 0.05) !important;
+        box-shadow: 0 20px 50px rgba(0, 0, 0, 0.3) !important;
         border-radius: 6px !important;
-        box-shadow: 0 8px 32px rgba(0, 0, 0, 0.5) !important;
+      }
+      .modal-header, 
+      .modal-footer, 
+      .settings-row {
+        border: none !important;
+        border-bottom: none !important;
+        border-top: none !important;
+        padding-bottom: 8px !important;
+      }
+      .settings-row {
+        padding-top: 8px !important;
       }
       .creation-modes-container .segment-btn.is-active {
         text-shadow: 0 0 8px rgba(255, 255, 255, 0.5) !important;
