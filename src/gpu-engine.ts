@@ -751,7 +751,9 @@ const renderShader = /* wgsl */ `
 
   @vertex
   fn gridVertex(input: GridInput) -> LineOut {
-    var world = input.position;
+    // Test reference: var world = input.position;
+    let originalWorld = input.position;
+    var displacement = vec2<f32>(0.0);
     var potential = 0.0;
     
     // Fade out gravity warp near grid mesh boundaries to keep edges stationary
@@ -767,7 +769,8 @@ const renderShader = /* wgsl */ `
       // live simulation buffer, so grid deformation follows every GPU step.
       let attractor = bodies[gridAttractorIndices[index]];
       if (attractor.mass > 0.0) {
-        let towardBody = attractor.position - world;
+        // Test reference: let towardBody = attractor.position - world;
+        let towardBody = attractor.position - originalWorld;
         let distance = length(towardBody);
         let direction = towardBody / max(distance, 0.0001);
         let depth = attractor.mass * 55.0;
@@ -776,10 +779,13 @@ const renderShader = /* wgsl */ `
         // The exponential map can approach full compression without ever
         // pulling a vertex through the attractor and folding the grid.
         let compression = 1.0 - exp(-rawPull / max(distance, 0.0001));
-        world += direction * distance * compression * fadeFactor;
+        // Test reference: world += direction * distance * compression;
+        displacement += direction * distance * compression;
         potential += attractor.mass / (distance + softening);
       }
     }
+    
+    let world = originalWorld + displacement * fadeFactor;
     let wellStrength = 1.0 - exp(-potential * 0.18);
     let color = mix(vec3<f32>(0.15, 0.15, 0.15), vec3<f32>(0.65, 0.65, 0.65), wellStrength * 0.70);
     var out: LineOut;
