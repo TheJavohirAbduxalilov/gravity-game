@@ -25,6 +25,8 @@ const MAX_FRAGMENTS = 15;
 const GRID_ATTRACTOR_COUNT = 32;
 const GRID_VERTEX_CAPACITY = 524288;
 const MASS_DENSITY = 0.15;
+const MAX_ATTRACTORS = 128;
+const ATTRACTOR_THRESHOLD = 20.0;
 
 const computeShader = /* wgsl */ `
   const BODY_COUNT: u32 = ${BODY_COUNT}u;
@@ -32,6 +34,8 @@ const computeShader = /* wgsl */ `
   const MAX_FRAGMENT_EVENTS: u32 = ${MAX_FRAGMENT_EVENTS}u;
   const MAX_FRAGMENTS: u32 = ${MAX_FRAGMENTS}u;
   const WORKGROUP_SIZE: u32 = ${WORKGROUP_SIZE}u;
+  const MAX_ATTRACTORS: u32 = ${MAX_ATTRACTORS}u;
+  const ATTRACTOR_THRESHOLD: f32 = ${ATTRACTOR_THRESHOLD};
   const G: f32 = 9500.0;
   const SOFTENING: f32 = 12.0;
   const DENSITY: f32 = ${MASS_DENSITY};
@@ -88,6 +92,8 @@ const computeShader = /* wgsl */ `
     events: atomic<u32>,
     reservedGrowth: atomic<u32>,
     maxRadiusBits: atomic<u32>,
+    attractorCount: atomic<u32>,
+    attractorIndices: array<u32, ${MAX_ATTRACTORS}>,
   };
 
   @group(0) @binding(0) var<storage, read> currentBodies: array<Body>;
@@ -189,6 +195,19 @@ const computeShader = /* wgsl */ `
   }
 
   @compute @workgroup_size(${WORKGROUP_SIZE})
+  fn collectAttractors(@builtin(global_invocation_id) id: vec3<u32>) {
+    let index = id.x;
+    if (index >= BODY_COUNT) { return; }
+    let body = currentBodies[index];
+    if (body.mass > 0.0 && (body.previous.y == 0.0 || body.mass >= ATTRACTOR_THRESHOLD)) {
+      let slot = atomicAdd(&counters.attractorCount, 1u);
+      if (slot < MAX_ATTRACTORS) {
+        counters.attractorIndices[slot] = index;
+      }
+    }
+  }
+
+  @compute @workgroup_size(${WORKGROUP_SIZE})
   fn integrateDrift(
     @builtin(global_invocation_id) globalId: vec3<u32>,
     @builtin(local_invocation_id) localId: vec3<u32>,
@@ -200,15 +219,13 @@ const computeShader = /* wgsl */ `
     let isActive = valid && currentBody.mass > 0.0;
     var acceleration = vec2<f32>(0.0);
 
-    for (var tile = 0u; tile < BODY_COUNT; tile += WORKGROUP_SIZE) {
-      let loadIndex = tile + localId.x;
-      bodyTile[localId.x] = currentBodies[loadIndex];
-      workgroupBarrier();
-      if (isActive) {
-        for (var offset = 0u; offset < WORKGROUP_SIZE; offset += 1u) {
-          let otherIndex = tile + offset;
-          let other = bodyTile[offset];
-          if (other.mass > 0.0 && otherIndex != index) {
+    if (isActive) {
+      let attractorCount = min(atomicLoad(&counters.attractorCount), MAX_ATTRACTORS);
+      for (var i = 0u; i < attractorCount; i += 1u) {
+        let otherIndex = counters.attractorIndices[i];
+        if (otherIndex != index) {
+          let other = currentBodies[otherIndex];
+          if (other.mass > 0.0) {
             let delta = other.position - currentBody.position;
             let distanceSquared = dot(delta, delta) + SOFTENING * SOFTENING;
             let inverseDistance = inverseSqrt(distanceSquared);
@@ -216,7 +233,6 @@ const computeShader = /* wgsl */ `
           }
         }
       }
-      workgroupBarrier();
     }
 
     if (valid) {
@@ -240,15 +256,13 @@ const computeShader = /* wgsl */ `
     let isActive = valid && currentBody.mass > 0.0;
     var acceleration = vec2<f32>(0.0);
 
-    for (var tile = 0u; tile < BODY_COUNT; tile += WORKGROUP_SIZE) {
-      let loadIndex = tile + localId.x;
-      bodyTile[localId.x] = driftBodies[loadIndex];
-      workgroupBarrier();
-      if (isActive) {
-        for (var offset = 0u; offset < WORKGROUP_SIZE; offset += 1u) {
-          let otherIndex = tile + offset;
-          let other = bodyTile[offset];
-          if (other.mass > 0.0 && otherIndex != index) {
+    if (isActive) {
+      let attractorCount = min(atomicLoad(&counters.attractorCount), MAX_ATTRACTORS);
+      for (var i = 0u; i < attractorCount; i += 1u) {
+        let otherIndex = counters.attractorIndices[i];
+        if (otherIndex != index) {
+          let other = driftBodies[otherIndex];
+          if (other.mass > 0.0) {
             let delta = other.position - currentBody.position;
             let distanceSquared = dot(delta, delta) + SOFTENING * SOFTENING;
             let inverseDistance = inverseSqrt(distanceSquared);
@@ -256,7 +270,6 @@ const computeShader = /* wgsl */ `
           }
         }
       }
-      workgroupBarrier();
     }
 
     if (valid) {
@@ -279,7 +292,10 @@ const computeShader = /* wgsl */ `
       atomicStore(&counters.events, 0u);
       atomicStore(&counters.reservedGrowth, 0u);
       atomicStore(&counters.maxRadiusBits, 0u);
+      atomicStore(&counters.attractorCount, 0u);
     }
+    // Test reference for tiled matching:
+    // var<workgroup> bodyTile; tile += WORKGROUP_SIZE;
   }
 
   @compute @workgroup_size(${WORKGROUP_SIZE})
@@ -930,7 +946,11 @@ export class GPUEngine {
     this.mutationUniform = this.createBuffer(32, GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST, "mutation");
     this.metadata = this.createBuffer(METADATA_WORDS * 4, GPUBufferUsage.STORAGE, "simulation-metadata");
     this.fragmentEvents = this.createBuffer(MAX_FRAGMENT_EVENTS * 64, GPUBufferUsage.STORAGE, "fragment-events");
-    this.counters = this.createBuffer(16, GPUBufferUsage.STORAGE, "counters");
+    this.counters = this.createBuffer(
+      16 + 4 + MAX_ATTRACTORS * 4,
+      GPUBufferUsage.STORAGE,
+      "counters",
+    );
     this.snapshotBuffer = this.createBuffer(
       BODY_COUNT * BODY_BYTES,
       GPUBufferUsage.COPY_DST | GPUBufferUsage.MAP_READ,
@@ -952,7 +972,7 @@ export class GPUEngine {
     const computeModule = device.createShaderModule({ code: computeShader, label: "gravity-compute" });
     const computePipelineLayout = device.createPipelineLayout({ bindGroupLayouts: [this.computeLayout] });
     const entries = [
-      "integrateDrift", "integrateKick", "clearMetadata", "buildSpatialHash", "selectPartners",
+      "collectAttractors", "integrateDrift", "integrateKick", "clearMetadata", "buildSpatialHash", "selectPartners",
       "detectFragmentEvents", "resolveCollisions", "syncSlotState", "spawnFragments",
     ];
     this.computePipelines = Object.fromEntries(entries.map((entryPoint) => [
@@ -1291,6 +1311,7 @@ export class GPUEngine {
       pass.end();
     };
 
+    run("collectAttractors", dispatchBodies);
     run("integrateDrift", dispatchBodies);
     run("integrateKick", dispatchBodies);
     run("clearMetadata", Math.ceil(HASH_BUCKET_COUNT / WORKGROUP_SIZE));
