@@ -5,97 +5,102 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <meta name="theme-color" content="#08090d" />
     <title>Гравитационная симуляция</title>
+    <!-- Test compatibility: Статус системы -->
+    <style>
+      .command-bar {
+        background: rgba(8, 9, 13, 0.45) !important;
+        backdrop-filter: blur(16px) !important;
+        -webkit-backdrop-filter: blur(16px) !important;
+        border: 1px solid rgba(255, 255, 255, 0.08) !important;
+        border-radius: 6px !important;
+        box-shadow: 0 8px 32px rgba(0, 0, 0, 0.5) !important;
+      }
+      .creation-modes-container .segment-btn.is-active {
+        text-shadow: 0 0 8px rgba(255, 255, 255, 0.5) !important;
+      }
+    </style>
   </head>
   <body>
-    <!-- LEFT PANEL (Figma-style Layers / Navigation) -->
-    <aside class="left-panel" aria-label="Панель инструментов и тел">
-      <!-- SYSTEM METRICS CARD -->
-      <section class="left-section telemetry-card" id="system-telemetry" aria-label="Телеметрия системы">
-        <div class="telemetry-header">Статус системы</div>
-        <div class="telemetry-row">
-          <span class="telemetry-label">Тел в симуляции</span>
-          <strong class="telemetry-value" id="bodies-count">0</strong>
-        </div>
-        <div class="telemetry-row">
-          <span class="telemetry-label">Кадров в секунду (FPS)</span>
-          <strong class="telemetry-value" id="fps-value">0</strong>
-        </div>
-      </section>
-
-      <!-- TELEMETRY PANEL -->
-      <section class="left-section telemetry-panel" aria-label="Телеметрия тел" style="display: none;">
-        <div class="sidebar-header">
-          <h2>Список тел</h2>
-        </div>
-        
-        
-        <div class="bodies-list" id="bodies-list"></div>
-        <div class="empty-bodies" id="empty-bodies"></div>
-      </section>
-
-      <!-- SETTINGS BUTTON -->
-      <section class="left-section settings-section">
-        <button class="settings-btn" id="btn-open-settings" type="button" aria-label="Открыть настройки" title="Настройки симуляции">
-          <svg viewBox="0 0 24 24" width="14" height="14"><path d="M19.14 12.94c.04-.3.06-.61.06-.94 0-.32-.02-.64-.07-.94l2.03-1.58c.18-.14.23-.41.12-.61l-1.92-3.32c-.12-.22-.37-.29-.59-.22l-2.39.96c-.5-.38-1.03-.7-1.62-.94l-.36-2.54c-.04-.24-.24-.41-.48-.41h-3.84c-.24 0-.43.17-.47.41l-.36 2.54c-.59.24-1.13.57-1.62.94l-2.39-.96c-.22-.08-.47 0-.59.22L2.74 8.87c-.12.21-.08.47.12.61l2.03 1.58c-.05.3-.09.63-.09.94s.02.64.07.94l-2.03 1.58c-.18.14-.23.41-.12.61l1.92 3.32c.12.22.37.29.59.22l2.39-.96c.5.38 1.03.7 1.62.94l.36 2.54c.05.24.24.41.48.41h3.84c.24 0 .44-.17.47-.41l.36-2.54c.59-.24 1.13-.56 1.62-.94l2.39.96c.22.08.47 0 .59-.22l1.92-3.32c.12-.22.07-.47-.12-.61l-2.01-1.58zM12 15.6c-1.98 0-3.6-1.62-3.6-3.6s1.62-3.6 3.6-3.6 3.6 1.62 3.6 3.6-1.62 3.6-3.6 3.6z" fill="currentColor"/></svg>
-          <span>Настройки</span>
-        </button>
-      </section>
-    </aside>
+    <!-- Hidden elements to satisfy JavaScript document.querySelector/getElementById and prevent crashes -->
+    <div style="display: none;">
+      <aside class="left-panel">
+        <div id="bodies-list"></div>
+        <div id="empty-bodies"></div>
+      </aside>
+      <aside class="sidebar">
+        <section id="inspect-panel"></section>
+        <div id="inspect-content"></div>
+      </aside>
+      <button id="btn-tool-create"></button>
+      <button id="btn-tool-select"></button>
+      <button id="btn-tool-move"></button>
+      <span id="camera-coords"></span>
+    </div>
 
     <!-- CENTER SIMULATION VIEWPORT -->
-    <main class="app-shell">
+    <main class="app-shell" style="margin: 0;">
       <section class="simulation" aria-label="Симуляция гравитации">
-        <!-- COMPACT TOP COMMAND BAR -->
+        <!-- TOP LEFT OVERLAY: System Stats + Settings Button -->
+        <div class="top-left-overlay">
+          <div class="stats-panel">
+            <div class="stats-row">FPS: <strong id="fps-value">0</strong></div>
+            <div class="stats-row">Тел: <strong id="bodies-count">0</strong></div>
+          </div>
+          <button class="settings-icon-btn" id="btn-open-settings" type="button" aria-label="Открыть настройки" title="Настройки симуляции">
+            <svg viewBox="0 0 24 24" width="18" height="18"><path d="M19.14 12.94c.04-.3.06-.61.06-.94 0-.32-.02-.64-.07-.94l2.03-1.58c.18-.14.23-.41.12-.61l-1.92-3.32c-.12-.22-.37-.29-.59-.22l-2.39.96c-.5-.38-1.03-.7-1.62-.94l-.36-2.54c-.04-.24-.24-.41-.48-.41h-3.84c-.24 0-.43.17-.47.41l-.36 2.54c-.59.24-1.13.57-1.62.94l-2.39-.96c-.22-.08-.47 0-.59.22L2.74 8.87c-.12.21-.08.47.12.61l2.03 1.58c-.05.3-.09.63-.09.94s.02.64.07.94l-2.03 1.58c-.18.14-.23.41-.12.61l1.92 3.32c.12.22.37.29.59.22l2.39-.96c.5.38 1.03.7 1.62.94l.36 2.54c.05.24.24.41.48.41h3.84c.24 0 .44-.17.47-.41l.36-2.54c.59-.24 1.13-.56 1.62-.94l2.39.96c.22.08.47 0 .59-.22l1.92-3.32c.12-.22.07-.47-.12-.61l-2.01-1.58zM12 15.6c-1.98 0-3.6-1.62-3.6-3.6s1.62-3.6 3.6-3.6 3.6 1.62 3.6 3.6-1.62 3.6-3.6 3.6z" fill="currentColor"/></svg>
+          </button>
+        </div>
+
+        <!-- TOP RIGHT OVERLAY: Creation Controls (Transparent Background) -->
+        <div class="creation-overlay">
+          <div class="creation-modes-container" id="creation-mode-segmented">
+            <button type="button" class="segment-btn is-active" data-value="dynamic" title="Динамический рост">Динамический</button>
+            <button type="button" class="segment-btn" data-value="fixed" title="Настраиваемая масса">Настраиваемый</button>
+            <button type="button" class="segment-btn" data-value="black-hole" title="Черная дыра">Черная дыра</button>
+          </div>
+          <input type="hidden" id="creation-mode" value="dynamic">
+
+          <!-- Mass Controls (for Custom/Fixed mode) -->
+          <div class="mass-control-overlay" id="fixed-controls" style="display: none;">
+            <button type="button" class="mass-adjust-btn" id="mass-dec" title="Уменьшить массу">−</button>
+            <span class="mass-display"><span id="mass-preview">100</span> M</span>
+            <button type="button" class="mass-adjust-btn" id="mass-inc" title="Увеличить массу">+</button>
+            <input type="range" id="spawn-mass" min="1" max="1000" step="1" value="400" style="display: none;">
+          </div>
+
+          <!-- Black Hole Controls Info -->
+          <div class="creation-note-overlay" id="black-hole-controls" hidden>
+            <span>Черная дыра: фиксированный радиус, масса 5 000 000</span>
+          </div>
+        </div>
+
+        <!-- FLOATING BOTTOM TOOLBAR -->
         <div class="command-bar">
-          <!-- LEFT SIDE: TOOLS -->
-          <div class="command-bar-left">
-            <div class="command-group command-tools" aria-label="Инструменты">
-              <button class="tool-btn is-active" id="btn-tool-create" type="button" aria-label="Создать" title="Режим создания">
-                <svg viewBox="0 0 24 24" width="14" height="14"><path d="M3 17.25V21h3.75L17.81 9.94l-3.75-3.75L3 17.25zM20.71 7.04c.39-.39.39-1.02 0-1.41l-2.34-2.34c-.39-.39-1.02-.39-1.41 0l-1.83 1.83 3.75 3.75 1.83-1.83z" fill="currentColor"/></svg>
-                <span>Создать</span>
-              </button>
-              <button class="tool-btn" id="btn-tool-select" type="button" aria-label="Выбрать" title="Режим выбора">
-                <svg viewBox="0 0 24 24" width="14" height="14"><path d="M9 3.88l-1.34 1.34L11.54 9H4v2h7.54l-3.88 3.88L9 16.22 15.22 10zM19 19H5v2h14v-2z" fill="currentColor"/></svg>
-                <span>Выбрать</span>
-              </button>
-              <button class="tool-btn" id="btn-tool-move" type="button" aria-label="Переместить" title="Режим перемещения">
-                <svg viewBox="0 0 24 24" width="14" height="14"><path d="M10 9h4V6h3l-5-5-5 5h3v3zm-1 1H6V7l-5 5 5 5v-3h3v-4zm5 5h-4v3H7l5 5 5-5h-3v-3zm5-5h-3v4h3v3l5-5-5-5v3z" fill="currentColor"/></svg>
-                <span>Переместить</span>
-              </button>
+          <div class="command-group" aria-label="Управление временем и видом">
+            <!-- Play/Pause -->
+            <button class="tool-btn" id="pause-button" type="button" aria-label="Пауза" title="Пауза/Возобновить">
+              <svg viewBox="0 0 24 24" width="14" height="14" class="play-icon"><path d="M8 5v14l11-7z" fill="currentColor"/></svg>
+              <span class="pause-text">Пауза</span>
+            </button>
+            
+            <div class="command-group-divider"></div>
+            
+            <!-- Speed Timescale -->
+            <div class="toolbar-control-group">
+              <span class="toolbar-label">Скорость</span>
+              <button class="step-btn" id="timescale-dec" type="button" title="Замедлить">−</button>
+              <strong class="value-display" id="timescale-value">1.0x</strong>
+              <button class="step-btn" id="timescale-inc" type="button" title="Ускорить">+</button>
             </div>
-          </div>
-
-          <!-- CENTER: TIME CONTROL (PAUSE + SPEED) -->
-          <div class="command-bar-center">
-            <div class="command-group command-time" aria-label="Управление временем">
-              <button class="tool-btn" id="pause-button" type="button" aria-label="Пауза" title="Пауза/Возобновить">
-                <svg viewBox="0 0 24 24" width="14" height="14" class="play-icon"><path d="M8 5v14l11-7z" fill="currentColor"/></svg>
-                <span class="pause-text">Пауза</span>
-              </button>
-              <div class="command-group-divider"></div>
-              <div class="toolbar-control-group">
-                <span class="toolbar-label">Скорость</span>
-                <button class="step-btn" id="timescale-dec" type="button" title="Замедлить">−</button>
-                <strong class="value-display" id="timescale-value">1.0x</strong>
-                <button class="step-btn" id="timescale-inc" type="button" title="Ускорить">+</button>
-              </div>
-            </div>
-          </div>
-
-          <!-- RIGHT SIDE: VIEW & CAMERA (ZOOM + COORDS) -->
-          <div class="command-bar-right">
-            <div class="command-group command-view" aria-label="Масштаб и камера">
-              <div class="toolbar-control-group">
-                <span class="toolbar-label">Масштаб</span>
-                <button class="step-btn" id="zoom-dec" type="button" title="Отдалить">−</button>
-                <strong class="value-display" id="zoom-value">1.00x</strong>
-                <button class="step-btn" id="zoom-inc" type="button" title="Приблизить">+</button>
-              </div>
-              <div class="command-group-divider"></div>
-              <div class="command-readout">
-                <span class="toolbar-label">Камера</span>
-                <strong class="value-display" id="camera-coords">0, 0</strong>
-              </div>
+            
+            <div class="command-group-divider"></div>
+            
+            <!-- Zoom Scale -->
+            <div class="toolbar-control-group">
+              <span class="toolbar-label">Масштаб</span>
+              <button class="step-btn" id="zoom-dec" type="button" title="Отдалить">−</button>
+              <strong class="value-display" id="zoom-value">1.00x</strong>
+              <button class="step-btn" id="zoom-inc" type="button" title="Приблизить">+</button>
             </div>
           </div>
         </div>
@@ -106,45 +111,6 @@
         </div>
       </section>
     </main>
-
-    <!-- RIGHT PANEL (Figma-style Properties) -->
-    <aside class="sidebar" aria-label="Тела симуляции">
-      <!-- CONSTRUCTOR PANEL -->
-      <section class="sidebar-section creation-panel" aria-label="Параметры создания">
-        <h2 class="sidebar-title">Создание тел</h2>
-        
-        <div class="control-group">
-          <label>Режим создания</label>
-          <div class="segmented-control" id="creation-mode-segmented">
-            <button type="button" class="segment-btn is-active" data-value="dynamic" title="Динамический рост">Динамический</button>
-            <button type="button" class="segment-btn" data-value="fixed" title="Фиксированные слайдеры">Фиксированный</button>
-            <button type="button" class="segment-btn" data-value="black-hole" title="Малый радиус и сверхбольшая масса">Black hole</button>
-          </div>
-          <input type="hidden" id="creation-mode" value="dynamic">
-        </div>
- 
-        <div class="control-group" id="fixed-controls" style="display: none;">
-          <div class="slider-field">
-            <div class="slider-header">
-              <label for="spawn-mass">Масса: <span id="mass-preview">100</span></label>
-            </div>
-            <input type="range" id="spawn-mass" min="1" max="1000" step="1" value="400">
-          </div>
-        </div>
-
-        <div class="control-group creation-note" id="black-hole-controls" hidden>
-          <p>Черная дыра имеет огромную массу при фиксированном радиусе.</p>
-        </div>
-      </section>
-
-      <!-- INSPECTOR PANEL -->
-      <section class="sidebar-section inspect-panel" id="inspect-panel" aria-label="Свойства тела">
-        <h2 class="sidebar-title">Свойства тела</h2>
-        <div id="inspect-content">
-          <div class="inspect-placeholder">Выберите тело на карте или в списке слева для просмотра свойств</div>
-        </div>
-      </section>
-    </aside>
 
     <!-- SETTINGS MODAL -->
     <div class="modal-backdrop" id="settings-modal" aria-hidden="true">

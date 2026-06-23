@@ -146,6 +146,21 @@ spawnMassSlider.addEventListener("input", () => {
   massPreview.textContent = getSpawnMass().toLocaleString("ru-RU");
 });
 
+const massDecBtn = document.querySelector<HTMLButtonElement>("#mass-dec");
+const massIncBtn = document.querySelector<HTMLButtonElement>("#mass-inc");
+if (massDecBtn && massIncBtn) {
+  massDecBtn.addEventListener("click", () => {
+    const val = parseInt(spawnMassSlider.value);
+    spawnMassSlider.value = Math.max(1, val - 30).toString();
+    spawnMassSlider.dispatchEvent(new Event("input"));
+  });
+  massIncBtn.addEventListener("click", () => {
+    const val = parseInt(spawnMassSlider.value);
+    spawnMassSlider.value = Math.min(1000, val + 30).toString();
+    spawnMassSlider.dispatchEvent(new Event("input"));
+  });
+}
+
 const playIconPath = "M8 5v14l11-7z";
 const pauseIconPath = "M6 19h4V5H6v14zm8-14v14h4V5h-4z";
 const pauseSvgPath = pauseButton.querySelector("svg path")!;

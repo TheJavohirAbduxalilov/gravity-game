@@ -1046,3 +1046,175 @@ input:checked + .slider:before {
 .modal-footer .action-btn:hover {
   opacity: 0.9;
 }
+
+/* Minimalist UI Layout Overrides */
+
+.left-panel,
+.sidebar {
+  display: none !important;
+}
+
+.app-shell {
+  margin-left: 0 !important;
+  margin-right: 0 !important;
+  height: 100vh !important;
+}
+
+.canvas-stage {
+  border-top: none !important;
+}
+
+/* Floating Bottom Toolbar */
+.command-bar {
+  position: absolute !important;
+  bottom: 24px !important;
+  left: 50% !important;
+  transform: translateX(-50%) !important;
+  z-index: 100 !important;
+  width: auto !important;
+  background: var(--bg-panel) !important;
+  border: 1px solid var(--border-subtle) !important;
+  border-radius: 2px !important;
+  padding: 8px 16px !important;
+  display: flex !important;
+  align-items: center !important;
+  gap: 16px !important;
+  height: auto !important;
+  flex: none !important;
+  min-height: 0 !important;
+}
+
+.command-bar-left,
+.command-bar-right .command-readout {
+  display: none !important;
+}
+
+.command-bar-center,
+.command-bar-right {
+  flex: none !important;
+}
+
+/* Top Left Overlay: Stats & Settings */
+.top-left-overlay {
+  position: absolute;
+  left: 24px;
+  top: 24px;
+  z-index: 100;
+  display: flex;
+  align-items: center;
+  gap: 16px;
+  font-family: 'Outfit', 'Inter', sans-serif;
+  color: rgba(255, 255, 255, 0.85);
+  font-size: 14px;
+  pointer-events: none;
+}
+
+.stats-panel {
+  display: flex;
+  gap: 14px;
+  background: transparent;
+}
+
+.stats-row {
+  display: flex;
+  gap: 4px;
+}
+
+.settings-icon-btn {
+  background: transparent;
+  border: none;
+  padding: 4px;
+  color: rgba(255, 255, 255, 0.65);
+  cursor: pointer;
+  border-radius: 0;
+  transition: color 0.2s ease, transform 0.2s ease;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  pointer-events: auto;
+}
+
+.settings-icon-btn:hover {
+  color: #fff;
+  transform: rotate(30deg);
+}
+
+/* Top Right Overlay: Creation Modes & Mass adjustments */
+.creation-overlay {
+  position: absolute;
+  right: 24px;
+  top: 24px;
+  z-index: 100;
+  display: flex;
+  flex-direction: column;
+  align-items: flex-end;
+  gap: 10px;
+  font-family: 'Outfit', 'Inter', sans-serif;
+}
+
+.creation-modes-container {
+  display: flex;
+  gap: 8px;
+}
+
+.creation-modes-container .segment-btn {
+  background: transparent !important;
+  border: none !important;
+  color: rgba(255, 255, 255, 0.5) !important;
+  padding: 6px 12px !important;
+  font-size: 14px !important;
+  cursor: pointer !important;
+  transition: color 0.2s ease, text-shadow 0.2s ease !important;
+  border-radius: 0 !important;
+  font-weight: 500 !important;
+}
+
+.creation-modes-container .segment-btn:hover {
+  color: rgba(255, 255, 255, 0.85) !important;
+}
+
+.creation-modes-container .segment-btn.is-active {
+  color: #fff !important;
+  border-bottom: 2px solid #fff !important;
+}
+
+.mass-control-overlay {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  color: #fff;
+  font-size: 14px;
+  background: transparent;
+  padding: 4px;
+}
+
+.mass-adjust-btn {
+  background: transparent !important;
+  border: 1px solid rgba(255, 255, 255, 0.2) !important;
+  color: rgba(255, 255, 255, 0.7) !important;
+  width: 24px !important;
+  height: 24px !important;
+  display: flex !important;
+  align-items: center !important;
+  justify-content: center !important;
+  cursor: pointer !important;
+  font-size: 14px !important;
+  transition: all 0.2s ease !important;
+  border-radius: 0 !important;
+}
+
+.mass-adjust-btn:hover {
+  border-color: #fff !important;
+  color: #fff !important;
+}
+
+.mass-display {
+  font-weight: 600;
+  min-width: 85px;
+  text-align: center;
+}
+
+.creation-note-overlay {
+  color: rgba(255, 255, 255, 0.5);
+  font-size: 12px;
+}
