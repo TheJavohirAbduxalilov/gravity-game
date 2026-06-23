@@ -211,11 +211,9 @@ function drawOrbitPrediction(): void {
 
   overlayCtx.beginPath();
   overlayCtx.strokeStyle = "rgba(255, 255, 255, 0.75)";
-  overlayCtx.lineWidth = 1.5;
+  overlayCtx.lineWidth = 1;
   overlayCtx.setLineDash([4, 4]);
   overlayCtx.lineDashOffset = -((performance.now() / 150) % 8);
-  overlayCtx.shadowColor = "rgba(255, 255, 255, 0.3)";
-  overlayCtx.shadowBlur = 4;
 
   if (points.length > 0) {
     overlayCtx.moveTo(points[0].x, points[0].y);
@@ -225,35 +223,35 @@ function drawOrbitPrediction(): void {
   }
   overlayCtx.stroke();
   overlayCtx.setLineDash([]);
-  overlayCtx.shadowBlur = 0;
 
   // Draw text info bubble
   const startScreen = worldToScreen(dragStartWorld);
   const speedVal = Math.hypot(velocity.x, velocity.y);
 
-  overlayCtx.fillStyle = "rgba(19, 20, 22, 0.9)";
-  overlayCtx.strokeStyle = "rgba(255, 255, 255, 0.12)";
-  overlayCtx.lineWidth = 1.5;
+  overlayCtx.fillStyle = "rgba(13, 15, 19, 0.94)";
+  overlayCtx.strokeStyle = "rgba(91, 99, 113, 0.9)";
+  overlayCtx.lineWidth = 1;
 
   const textLines = [
     `Масса: ${Math.round(massVal).toLocaleString("ru-RU")}`,
     `Скорость: ${Math.round(speedVal).toLocaleString("ru-RU")} ед/с`,
   ];
 
-  const bubbleWidth = 140;
-  const bubbleHeight = 46;
+  const bubbleWidth = 136;
+  const bubbleHeight = 42;
   const bubbleX = startScreen.x + 15;
-  const bubbleY = startScreen.y - 50;
+  const bubbleY = startScreen.y - 46;
 
   overlayCtx.beginPath();
-  overlayCtx.roundRect(bubbleX, bubbleY, bubbleWidth, bubbleHeight, 8);
+  overlayCtx.roundRect(bubbleX, bubbleY, bubbleWidth, bubbleHeight, 2);
   overlayCtx.fill();
   overlayCtx.stroke();
 
-  overlayCtx.fillStyle = "#f3f4f6";
-  overlayCtx.font = "11px Inter, \"Segoe UI\", system-ui, sans-serif";
-  overlayCtx.fillText(textLines[0], bubbleX + 12, bubbleY + 18);
-  overlayCtx.fillText(textLines[1], bubbleX + 12, bubbleY + 32);
+  overlayCtx.fillStyle = "#e6e8ec";
+  overlayCtx.font = "11px ui-monospace, SFMono-Regular, Menlo, Consolas, monospace";
+  overlayCtx.fillText(textLines[0], bubbleX + 8, bubbleY + 16);
+  overlayCtx.fillStyle = "#a2a9b5";
+  overlayCtx.fillText(textLines[1], bubbleX + 8, bubbleY + 30);
 }
 
 function resize(): void {

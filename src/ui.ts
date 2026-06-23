@@ -34,6 +34,7 @@ type CardRefs = {
   card: HTMLElement;
   nameText: HTMLElement;
   mass: HTMLElement;
+  speed: HTMLElement;
   favorite: HTMLButtonElement;
   color: HTMLElement;
 };
@@ -257,6 +258,7 @@ export class BodiesSidebar {
   private updateValues(refs: CardRefs, body: BodySnapshot): void {
     refs.nameText.textContent = body.name;
     refs.mass.textContent = `${formatNumber(body.mass, 1)} M`;
+    refs.speed.textContent = formatNumber(Math.hypot(body.velocity.x, body.velocity.y), 1);
     const c = getBodyColor(body.mass, body.velocity.x, body.velocity.y);
     refs.color.style.background = c;
     refs.color.style.color = c;
@@ -292,6 +294,7 @@ export class BodiesSidebar {
       <span class="body-color"></span>
       <span class="body-name"></span>
       <span class="body-mass"></span>
+      <span class="body-speed"></span>
       <button class="favorite-toggle" type="button" aria-pressed="false" aria-label="В избранное" title="В избранное">${STAR_ICON}</button>
     `;
 
@@ -299,6 +302,7 @@ export class BodiesSidebar {
       card,
       nameText: card.querySelector<HTMLElement>(".body-name")!,
       mass: card.querySelector<HTMLElement>(".body-mass")!,
+      speed: card.querySelector<HTMLElement>(".body-speed")!,
       favorite: card.querySelector<HTMLButtonElement>(".favorite-toggle")!,
       color: card.querySelector<HTMLElement>(".body-color")!,
     };

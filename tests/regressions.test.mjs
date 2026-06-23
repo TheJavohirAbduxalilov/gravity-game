@@ -110,13 +110,52 @@ test("camera pans with the right mouse button and suppresses its menu", () => {
   assert.match(main, /addEventListener\("contextmenu", \(event\) => event\.preventDefault\(\)\)/);
 });
 
-test("UI contains only the canvas and body sidebar", () => {
+test("UI exposes the compact three-panel simulation workspace", () => {
   assert.match(html, /<canvas id="space-canvas"><\/canvas>/);
+  assert.match(html, /<canvas id="overlay-canvas"><\/canvas>/);
+  assert.match(html, /<aside class="left-panel"/);
   assert.match(html, /<aside class="sidebar"/);
+  assert.match(html, /<div class="command-bar">/);
+  assert.doesNotMatch(html, /bottom-toolbar/);
+  assert.match(html, /id="pause-button"/);
+  assert.match(html, /id="btn-tool-create"/);
+  assert.match(html, /id="btn-tool-select"/);
+  assert.match(html, /id="timescale-value"/);
+  assert.match(html, /id="camera-coords"/);
+  assert.match(html, /id="creation-mode"/);
+  assert.match(html, /id="inspect-panel"/);
+  assert.match(main, /const overlayCanvas = document\.querySelector<HTMLCanvasElement>\("#overlay-canvas"\)!/);
+  assert.match(main, /let activeTool: "create" \| "select"/);
   assert.doesNotMatch(html, /topbar|brand-mark|instruction|legend|camera-help|<footer/);
   assert.doesNotMatch(main, /mode-create|mode-select|notice/);
-  assert.match(styles, /\.app-shell \{[\s\S]*?margin-right: 284px;[\s\S]*?padding: 0;/);
-  assert.match(styles, /\.sidebar \{[\s\S]*?top: 0;[\s\S]*?right: 0;[\s\S]*?bottom: 0;/);
+  assert.match(styles, /\.left-panel \{[\s\S]*?left: 0;[\s\S]*?width: var\(--panel-left-width\);/);
+  assert.match(styles, /\.app-shell \{[\s\S]*?margin-right: var\(--panel-right-width\);[\s\S]*?padding: 0;/);
+  assert.match(styles, /\.sidebar \{[\s\S]*?right: 0;[\s\S]*?width: var\(--panel-right-width\);/);
+});
+
+test("UI design system is compact, flat, and instrument-like", () => {
+  assert.match(styles, /--bg-panel:/);
+  assert.match(styles, /--border-subtle:/);
+  assert.match(styles, /--text-muted:/);
+  assert.match(styles, /--accent: #3b82f6/);
+  assert.match(styles, /--space-1: 4px/);
+  assert.match(styles, /font-variant-numeric: tabular-nums/);
+  assert.match(styles, /\.command-bar \{/);
+  assert.match(styles, /\.canvas-stage \{/);
+  assert.match(styles, /\.body-card \{[\s\S]*?display: grid;/);
+  assert.match(ui, /body-speed/);
+  assert.doesNotMatch(styles, /backdrop-filter|box-shadow|border-radius:\s*(?:[4-9]|1\d|2\d)px|border-radius:\s*50%/);
+  assert.doesNotMatch(styles, /#4ade80/);
+});
+
+test("source text is valid UTF-8 without visible replacement mojibake", () => {
+  for (const source of [html, main, ui, styles]) {
+    assert.doesNotMatch(source, /�|пїЅ/);
+  }
+  assert.match(html, /Гравитационная симуляция/);
+  assert.match(html, /Статус системы/);
+  assert.match(main, /Продолжить/);
+  assert.match(ui, /Выберите тело/);
 });
 
 test("mobile layout does not force a desktop minimum width", () => {
