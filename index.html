@@ -8,15 +8,124 @@
     <!-- Test compatibility: Статус системы -->
     <style>
       /* Minimalist, borderless, transparent aesthetics overrides */
-      .command-bar {
-        background: rgba(0, 0, 0, 0.25) !important;
-        backdrop-filter: blur(20px) !important;
-        -webkit-backdrop-filter: blur(20px) !important;
-        border: none !important;
-        box-shadow: none !important;
+      .simulation .command-bar {
+        position: absolute !important;
+        bottom: 24px !important;
+        left: 50% !important;
+        transform: translateX(-50%) !important;
+        z-index: 100 !important;
+        width: auto !important;
+        min-width: 320px !important;
+        background: rgba(8, 9, 13, 0.6) !important;
+        backdrop-filter: blur(24px) !important;
+        -webkit-backdrop-filter: blur(24px) !important;
+        border: 1px solid rgba(255, 255, 255, 0.06) !important;
+        border-radius: 12px !important;
+        box-shadow: 0 20px 40px rgba(0, 0, 0, 0.4) !important;
+        padding: 0 !important;
+        overflow: hidden !important;
+        display: flex !important;
+        flex-direction: column !important;
+        align-items: stretch !important;
+        gap: 0 !important;
       }
-      .command-group-divider {
-        display: none !important;
+
+      /* YouTube-style Red Progress Accent */
+      .yt-progress-accent {
+        height: 3px !important;
+        background: #ff0000 !important;
+        width: 100% !important;
+        position: relative !important;
+        box-shadow: 0 0 6px rgba(255, 0, 0, 0.8) !important;
+      }
+
+      /* Controls Wrapper */
+      .yt-controls {
+        display: flex !important;
+        align-items: center !important;
+        justify-content: space-between !important;
+        padding: 8px 16px !important;
+        gap: 16px !important;
+      }
+
+      /* Play/Pause Button */
+      .yt-btn {
+        background: transparent !important;
+        border: none !important;
+        color: rgba(255, 255, 255, 0.85) !important;
+        cursor: pointer !important;
+        display: flex !important;
+        align-items: center !important;
+        justify-content: center !important;
+        width: 32px !important;
+        height: 32px !important;
+        border-radius: 50% !important;
+        transition: background 0.2s ease, color 0.2s ease, transform 0.1s ease !important;
+      }
+      .yt-btn:hover {
+        background: rgba(255, 255, 255, 0.1) !important;
+        color: #ffffff !important;
+      }
+      .yt-btn:active {
+        transform: scale(0.95) !important;
+      }
+
+      .yt-btn svg {
+        display: block !important;
+      }
+
+      /* Control Group */
+      .yt-control-group {
+        display: flex !important;
+        align-items: center !important;
+        gap: 8px !important;
+      }
+
+      .yt-label {
+        color: rgba(255, 255, 255, 0.4) !important;
+        font-size: 11px !important;
+        font-weight: 600 !important;
+        text-transform: uppercase !important;
+        letter-spacing: 0.05em !important;
+      }
+
+      .yt-value {
+        color: #ffffff !important;
+        font-size: 13px !important;
+        font-weight: 500 !important;
+        min-width: 48px !important;
+        text-align: center !important;
+        font-family: 'Outfit', 'Inter', sans-serif !important;
+      }
+
+      /* Adjustment Buttons */
+      .yt-adjust-btn {
+        background: rgba(255, 255, 255, 0.05) !important;
+        border: none !important;
+        color: rgba(255, 255, 255, 0.7) !important;
+        width: 24px !important;
+        height: 24px !important;
+        border-radius: 6px !important;
+        display: flex !important;
+        align-items: center !important;
+        justify-content: center !important;
+        cursor: pointer !important;
+        font-size: 14px !important;
+        font-weight: 600 !important;
+        transition: all 0.2s ease !important;
+      }
+      .yt-adjust-btn:hover {
+        background: rgba(255, 255, 255, 0.15) !important;
+        color: #ffffff !important;
+      }
+      .yt-adjust-btn:active {
+        transform: scale(0.9) !important;
+      }
+
+      .yt-divider {
+        width: 1px !important;
+        height: 18px !important;
+        background: rgba(255, 255, 255, 0.1) !important;
       }
 
       /* Modal glass theme & borderless */
@@ -31,7 +140,7 @@
         -webkit-backdrop-filter: blur(24px) !important;
         border: 1px solid rgba(255, 255, 255, 0.05) !important;
         box-shadow: 0 20px 50px rgba(0, 0, 0, 0.3) !important;
-        border-radius: 6px !important;
+        border-radius: 12px !important;
       }
       .modal-header, 
       .modal-footer, 
@@ -103,33 +212,37 @@
           </div>
         </div>
 
-        <!-- FLOATING BOTTOM TOOLBAR -->
+        <!-- FLOATING BOTTOM TOOLBAR (YouTube Player Inspired) -->
         <div class="command-bar">
-          <div class="command-group" aria-label="Управление временем и видом">
-            <!-- Play/Pause -->
-            <button class="tool-btn" id="pause-button" type="button" aria-label="Пауза" title="Пауза/Возобновить">
-              <svg viewBox="0 0 24 24" width="14" height="14" class="play-icon"><path d="M8 5v14l11-7z" fill="currentColor"/></svg>
-              <span class="pause-text">Пауза</span>
+          <!-- YouTube-style Red Progress Accent -->
+          <div class="yt-progress-accent"></div>
+
+          <!-- Controls Wrapper -->
+          <div class="yt-controls">
+            <!-- Play/Pause Button -->
+            <button class="yt-btn" id="pause-button" type="button" aria-label="Пауза" title="Пауза/Возобновить">
+              <svg viewBox="0 0 24 24" width="18" height="18"><path d="M6 19h4V5H6v14zm8-14v14h4V5h-4z" fill="currentColor"/></svg>
+              <span class="pause-text" style="display: none;">Пауза</span>
             </button>
-            
-            <div class="command-group-divider"></div>
-            
-            <!-- Speed Timescale -->
-            <div class="toolbar-control-group">
-              <span class="toolbar-label">Скорость</span>
-              <button class="step-btn" id="timescale-dec" type="button" title="Замедлить">−</button>
-              <strong class="value-display" id="timescale-value">1.0x</strong>
-              <button class="step-btn" id="timescale-inc" type="button" title="Ускорить">+</button>
+
+            <div class="yt-divider"></div>
+
+            <!-- Timescale Speed Control -->
+            <div class="yt-control-group">
+              <span class="yt-label">Скорость</span>
+              <button class="yt-adjust-btn" id="timescale-dec" type="button" title="Замедлить">−</button>
+              <span class="yt-value" id="timescale-value">1.0x</span>
+              <button class="yt-adjust-btn" id="timescale-inc" type="button" title="Ускорить">+</button>
             </div>
-            
-            <div class="command-group-divider"></div>
-            
-            <!-- Zoom Scale -->
-            <div class="toolbar-control-group">
-              <span class="toolbar-label">Масштаб</span>
-              <button class="step-btn" id="zoom-dec" type="button" title="Отдалить">−</button>
-              <strong class="value-display" id="zoom-value">1.00x</strong>
-              <button class="step-btn" id="zoom-inc" type="button" title="Приблизить">+</button>
+
+            <div class="yt-divider"></div>
+
+            <!-- Zoom Scale Control -->
+            <div class="yt-control-group">
+              <span class="yt-label">Масштаб</span>
+              <button class="yt-adjust-btn" id="zoom-dec" type="button" title="Отдалить">−</button>
+              <span class="yt-value" id="zoom-value">1.00x</span>
+              <button class="yt-adjust-btn" id="zoom-inc" type="button" title="Приблизить">+</button>
             </div>
           </div>
         </div>
