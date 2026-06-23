@@ -128,7 +128,7 @@ const computeShader = /* wgsl */ `
   fn disruptionThreshold(totalMass: f32) -> f32 {
     // Larger aggregates need significantly more specific impact energy to disrupt,
     // scaling with square root of mass to approximate gravitational binding energy.
-    return 0.125 * FRAGMENT_SPEED * FRAGMENT_SPEED * (1.0 + 0.02 * sqrt(totalMass));
+    return 0.125 * FRAGMENT_SPEED * FRAGMENT_SPEED * (1.0 + 0.20 * sqrt(totalMass));
   }
 
   fn fragmentCount(
@@ -335,7 +335,9 @@ const computeShader = /* wgsl */ `
 
     let sourceBody = kickBodies[index];
     let other = kickBodies[partner];
-    let generation = max(sourceBody.previous.y, other.previous.y);
+    let genA = select(0.0, sourceBody.previous.y, params.time < sourceBody.previous.x);
+    let genB = select(0.0, other.previous.y, params.time < other.previous.x);
+    let generation = max(genA, genB);
     let protectionActive = params.time < max(sourceBody.previous.x, other.previous.x);
     if (protectionActive || generation >= MAX_FRAGMENT_GENERATION) { return; }
     let normal = safeDirection(other.position - sourceBody.position, vec2<f32>(1.0, 0.0));
@@ -414,7 +416,9 @@ const computeShader = /* wgsl */ `
     let disruptive = normalSpeed >= FRAGMENT_SPEED * 0.05
       && coupledEnergy / totalMass >= disruptionThreshold(totalMass);
     let protectionActive = params.time < max(sourceBody.previous.x, other.previous.x);
-    let generation = max(sourceBody.previous.y, other.previous.y);
+    let genA = select(0.0, sourceBody.previous.y, params.time < sourceBody.previous.x);
+    let genB = select(0.0, other.previous.y, params.time < other.previous.x);
+    let generation = max(genA, genB);
     let unresolvedCollision = min(sourceBody.mass, other.mass) < MIN_FRAGMENT_MASS * 1.5;
     let survivor = sourceBody.mass > other.mass || (abs(sourceBody.mass - other.mass) < 0.0001 && index < partner);
     if (ratio >= MERGE_RATIO || disruptive || protectionActive || generation >= MAX_FRAGMENT_GENERATION || unresolvedCollision) {
@@ -426,9 +430,10 @@ const computeShader = /* wgsl */ `
       sourceBody.velocity = (sourceBody.velocity * sourceBody.mass + other.velocity * other.mass) / totalMass;
       sourceBody.mass = totalMass;
       sourceBody.radius = sqrt(totalMass / DENSITY);
+      let mergedGeneration = (sourceBody.mass * genA + other.mass * genB) / totalMass;
       sourceBody.previous = vec2<f32>(
         max(sourceBody.previous.x, other.previous.x),
-        generation,
+        mergedGeneration,
       );
       outputBodies[index] = sourceBody;
       return;
@@ -1246,13 +1251,15 @@ export class GPUEngine {
     return false;
   }
 
-  render(camera: CameraState, preview: CreationPreview | null): void {
+  render(camera: CameraState, preview: CreationPreview | null, showGrid = true): void {
     while (this.flushPendingMutations()) {}
     this.lastCamera.x = camera.x;
     this.lastCamera.y = camera.y;
     this.lastCamera.zoom = camera.zoom;
     this.updateGridAttractorIndices();
-    this.updateGridGeometry(camera);
+    if (showGrid) {
+      this.updateGridGeometry(camera);
+    }
     const vector = preview?.vectorEnd;
     const uniforms = new Float32Array([
       camera.x, camera.y, camera.zoom, this.width,
@@ -1271,9 +1278,11 @@ export class GPUEngine {
       }],
     });
     pass.setBindGroup(0, this.renderBindGroup);
-    pass.setPipeline(this.gridPipeline);
-    pass.setVertexBuffer(0, this.gridBuffer);
-    pass.draw(this.gridVertexCount);
+    if (showGrid) {
+      pass.setPipeline(this.gridPipeline);
+      pass.setVertexBuffer(0, this.gridBuffer);
+      pass.draw(this.gridVertexCount);
+    }
     pass.setPipeline(this.trailPipeline);
     pass.draw(2, BODY_COUNT);
     pass.setPipeline(this.bodyPipeline);

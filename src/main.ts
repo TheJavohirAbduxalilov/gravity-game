@@ -56,14 +56,28 @@ interface HistoryPoint {
   pos: Vec2;
   vel: Vec2;
   mass: number;
-}
-interface FadingHistory {
-  points: HistoryPoint[];
-  radius: number;
-  alpha: number;
+  dist: number;
 }
 const bodyHistories = new Map<number, HistoryPoint[]>();
-const fadingHistories: FadingHistory[] = [];
+
+const settings = {
+  cameraShake: localStorage.getItem("setting_camera_shake") !== "false",
+  collisionSounds: localStorage.getItem("setting_collision_sounds") !== "false",
+  showTrails: localStorage.getItem("setting_show_trails") !== "false",
+  showGrid: localStorage.getItem("setting_show_grid") !== "false",
+  velocityInputMode: localStorage.getItem("setting_velocity_input_mode") || "opposite"
+};
+
+const btnOpenSettings = document.querySelector<HTMLButtonElement>("#btn-open-settings")!;
+const settingsModal = document.querySelector<HTMLElement>("#settings-modal")!;
+const btnCloseModal = document.querySelector<HTMLButtonElement>("#btn-close-modal")!;
+const btnSaveSettings = document.querySelector<HTMLButtonElement>("#btn-save-settings")!;
+
+const settingCameraShake = document.querySelector<HTMLInputElement>("#setting-camera-shake")!;
+const settingCollisionSounds = document.querySelector<HTMLInputElement>("#setting-collision-sounds")!;
+const settingShowTrails = document.querySelector<HTMLInputElement>("#setting-show-trails")!;
+const settingShowGrid = document.querySelector<HTMLInputElement>("#setting-show-grid")!;
+const settingVelocityMode = document.querySelector<HTMLSelectElement>("#setting-velocity-mode")!;
 
 const pauseButton = document.querySelector<HTMLButtonElement>("#pause-button")!;
 const pauseText = pauseButton.querySelector<HTMLElement>(".pause-text")!;
@@ -168,6 +182,46 @@ zoomInc.addEventListener("click", () => {
   updateToolbarReadouts();
 });
 
+btnOpenSettings.addEventListener("click", () => {
+  settingCameraShake.checked = settings.cameraShake;
+  settingCollisionSounds.checked = settings.collisionSounds;
+  settingShowTrails.checked = settings.showTrails;
+  settingShowGrid.checked = settings.showGrid;
+  settingVelocityMode.value = settings.velocityInputMode;
+  
+  settingsModal.classList.add("is-open");
+  settingsModal.setAttribute("aria-hidden", "false");
+});
+
+const closeModal = () => {
+  settingsModal.classList.remove("is-open");
+  settingsModal.setAttribute("aria-hidden", "true");
+};
+
+btnCloseModal.addEventListener("click", closeModal);
+
+btnSaveSettings.addEventListener("click", () => {
+  settings.cameraShake = settingCameraShake.checked;
+  settings.collisionSounds = settingCollisionSounds.checked;
+  settings.showTrails = settingShowTrails.checked;
+  settings.showGrid = settingShowGrid.checked;
+  settings.velocityInputMode = settingVelocityMode.value;
+  
+  localStorage.setItem("setting_camera_shake", String(settings.cameraShake));
+  localStorage.setItem("setting_collision_sounds", String(settings.collisionSounds));
+  localStorage.setItem("setting_show_trails", String(settings.showTrails));
+  localStorage.setItem("setting_show_grid", String(settings.showGrid));
+  localStorage.setItem("setting_velocity_input_mode", settings.velocityInputMode);
+  
+  closeModal();
+});
+
+settingsModal.addEventListener("click", (event) => {
+  if (event.target === settingsModal) {
+    closeModal();
+  }
+});
+
 function updateToolbarReadouts(): void {
   zoomValueEl.textContent = `${camera.zoom.toFixed(2)}x`;
   cameraCoordsEl.textContent = `${Math.round(camera.x)}, ${Math.round(camera.y)}`;
@@ -183,10 +237,11 @@ function worldToScreen(point: Vec2): Vec2 {
 function drawOrbitPrediction(): void {
   const isFixed = spawnModeSelect.value === "fixed";
   const massVal = isFixed ? getSpawnMass() : (currentGrowthRadius() ** 2 * 0.15);
+  const mult = settings.velocityInputMode === "opposite" ? -1 : 1;
   const velocity = creationStyle === "vector"
     ? {
-        x: (dragCurrentWorld.x - dragStartWorld.x) * VELOCITY_SCALE,
-        y: (dragCurrentWorld.y - dragStartWorld.y) * VELOCITY_SCALE,
+        x: (dragCurrentWorld.x - dragStartWorld.x) * VELOCITY_SCALE * mult,
+        y: (dragCurrentWorld.y - dragStartWorld.y) * VELOCITY_SCALE * mult,
       }
     : { x: 0, y: 0 };
 
@@ -335,10 +390,17 @@ function renameBody(id: number, name: string): void {
 
 function creationPreview(now: number): CreationPreview | null {
   if (interactionMode !== "create") return null;
+  const mult = settings.velocityInputMode === "opposite" ? -1 : 1;
+  const vectorEnd = creationStyle === "vector"
+    ? {
+        x: dragStartWorld.x + (dragCurrentWorld.x - dragStartWorld.x) * mult,
+        y: dragStartWorld.y + (dragCurrentWorld.y - dragStartWorld.y) * mult,
+      }
+    : undefined;
   return {
     position: dragStartWorld,
     radius: currentGrowthRadius(now),
-    vectorEnd: creationStyle === "vector" ? dragCurrentWorld : undefined,
+    vectorEnd,
   };
 }
 
@@ -444,10 +506,11 @@ canvas.addEventListener("pointerup", (event) => {
     }
   } else if (interactionMode === "create") {
     dragCurrentWorld = screenToWorld(pointerScreenPosition(event));
+    const mult = settings.velocityInputMode === "opposite" ? -1 : 1;
     const velocity = creationStyle === "vector"
       ? {
-          x: (dragCurrentWorld.x - dragStartWorld.x) * VELOCITY_SCALE,
-          y: (dragCurrentWorld.y - dragStartWorld.y) * VELOCITY_SCALE,
+          x: (dragCurrentWorld.x - dragStartWorld.x) * VELOCITY_SCALE * mult,
+          y: (dragCurrentWorld.y - dragStartWorld.y) * VELOCITY_SCALE * mult,
         }
       : { x: 0, y: 0 };
     const radius = currentGrowthRadius();
@@ -548,55 +611,108 @@ function drawSplineTrail(
       x: estX + (dx / dist) * bodyRadius,
       y: estY + (dy / dist) * bodyRadius
     };
+    const boundaryDist = lastPoint.dist + (dist - bodyRadius);
     renderPoints.push({
       pos: boundaryPoint,
       vel: bodyVel,
-      mass: bodyMass
+      mass: bodyMass,
+      dist: boundaryDist
     });
   }
 
   if (renderPoints.length < 2) return;
 
-  overlayCtx.lineCap = "butt";
-  overlayCtx.lineJoin = "round";
-  overlayCtx.lineWidth = Math.max(1.0, Math.min(2.5, 0.6 + Math.sqrt(bodyMass) * 0.04));
+  // Spacing target on screen is 12 pixels. In world space, this is:
+  const targetSpacingScreen = 12;
+  const targetSpacingWorld = targetSpacingScreen / camera.zoom;
 
-  const len = renderPoints.length;
-  for (let i = 0; i < len - 1; i++) {
-    const pA = renderPoints[i];
-    const pB = renderPoints[i + 1];
+  const interpolated: Vec2[] = [];
+  const minDist = renderPoints[0].dist;
+  const maxDist = renderPoints[renderPoints.length - 1].dist;
 
-    const t = i / (len - 1);
-    const segmentAlpha = t * baseAlpha * overallAlpha;
+  const startN = Math.ceil(minDist / targetSpacingWorld);
+  const endN = Math.floor(maxDist / targetSpacingWorld);
 
-    const colorStr = getHeatColor(pB.mass, pB.vel.x, pB.vel.y, segmentAlpha);
+  let segmentIdx = 0;
+  for (let n = startN; n <= endN; n++) {
+    const targetDist = n * targetSpacingWorld;
+    // Find the segment containing targetDist
+    while (segmentIdx < renderPoints.length - 1 && renderPoints[segmentIdx + 1].dist < targetDist) {
+      segmentIdx++;
+    }
+    if (segmentIdx >= renderPoints.length - 1) break;
+
+    const pA = renderPoints[segmentIdx];
+    const pB = renderPoints[segmentIdx + 1];
+    const denom = pB.dist - pA.dist;
+    const t = denom > 0.0001 ? (targetDist - pA.dist) / denom : 0;
+
+    interpolated.push({
+      x: pA.pos.x + (pB.pos.x - pA.pos.x) * t,
+      y: pA.pos.y + (pB.pos.y - pA.pos.y) * t
+    });
+  }
+
+  // Convert to screen space
+  const screenPoints = interpolated.map((p) => worldToScreen(p));
+
+  // Always draw a point at the head (the boundary point) to prevent any gaps
+  const lastRenderPoint = renderPoints[renderPoints.length - 1];
+  const lastScreenPoint = worldToScreen(lastRenderPoint.pos);
+  if (screenPoints.length > 0) {
+    const lastInterp = screenPoints[screenPoints.length - 1];
+    const distToHead = Math.hypot(lastScreenPoint.x - lastInterp.x, lastScreenPoint.y - lastInterp.y);
+    if (distToHead > 3.0) {
+      screenPoints.push(lastScreenPoint);
+    }
+  } else {
+    screenPoints.push(lastScreenPoint);
+  }
+
+  const numInterp = screenPoints.length;
+  // Calculate zoom factor for dot radius
+  const zoomFactor = Math.pow(camera.zoom, 0.35);
+  // Base dot size in pixels (independent of body mass)
+  const baseDotSize = 1.3;
+
+  for (let j = 0; j < numInterp; j++) {
+    const sPos = screenPoints[j];
+
+    // Performance optimization: skip off-screen dots
+    if (sPos.x < -10 || sPos.x > width + 10 || sPos.y < -10 || sPos.y > height + 10) {
+      continue;
+    }
+
+    // Check if the dot is covered/overlapped by any planet
+    let covered = false;
+    for (const b of snapshots) {
+      const bRad = b.radius * camera.zoom;
+      const bPos = worldToScreen(b.position);
+      const dx = sPos.x - bPos.x;
+      if (Math.abs(dx) >= bRad) continue;
+      const dy = sPos.y - bPos.y;
+      if (Math.abs(dy) >= bRad) continue;
+
+      if (dx * dx + dy * dy < (bRad - 0.5) * (bRad - 0.5)) {
+        covered = true;
+        break;
+      }
+    }
+    if (covered) continue;
+
+    // t goes from 0.0 (tail) to 1.0 (head)
+    const t = j / Math.max(1, numInterp - 1);
+    const alpha = t * baseAlpha * overallAlpha;
+
+    // Scale dot radius: tapers to 40% at the tail, and adjusted by zoomFactor
+    const size = baseDotSize * (0.4 + 0.6 * t) * zoomFactor;
+    // Keep size bounded between 0.7px and 3.0px so it remains a crisp dot
+    const dotRadius = Math.max(0.7, Math.min(3.0, size));
 
     overlayCtx.beginPath();
-    const sA = worldToScreen(pA.pos);
-    const sB = worldToScreen(pB.pos);
-
-    overlayCtx.moveTo(sA.x, sA.y);
-
-    const d = Math.hypot(pB.pos.x - pA.pos.x, pB.pos.y - pA.pos.y);
-    const sSpeedA = Math.hypot(pA.vel.x, pA.vel.y);
-    const sSpeedB = Math.hypot(pB.vel.x, pB.vel.y);
-
-    const kA = sSpeedA > 0.0001 ? d / (3 * sSpeedA) : 0;
-    const kB = sSpeedB > 0.0001 ? d / (3 * sSpeedB) : 0;
-
-    const cp1 = worldToScreen({
-      x: pA.pos.x + pA.vel.x * kA,
-      y: pA.pos.y + pA.vel.y * kA
-    });
-    const cp2 = worldToScreen({
-      x: pB.pos.x - pB.vel.x * kB,
-      y: pB.pos.y - pB.vel.y * kB
-    });
-
-    overlayCtx.bezierCurveTo(cp1.x, cp1.y, cp2.x, cp2.y, sB.x, sB.y);
-
-    overlayCtx.strokeStyle = colorStr;
-    overlayCtx.stroke();
+    overlayCtx.arc(sPos.x, sPos.y, dotRadius, 0, 2 * Math.PI);
+    overlayCtx.fillStyle = `rgba(255, 255, 255, ${alpha})`;
+    overlayCtx.fill();
   }
 }
 
@@ -636,18 +752,9 @@ function frame(now: number): void {
         const freshIds = new Set(fresh.map((b) => b.id));
         snapshotSimTime = snapTime;
 
-        // Clean up histories for bodies that no longer exist, moving them to fadingHistories
-        for (const [id, history] of bodyHistories.entries()) {
+        // Clean up histories for bodies that no longer exist
+        for (const id of bodyHistories.keys()) {
           if (!freshIds.has(id)) {
-            const oldBody = snapshots.find((b) => b.id === id);
-            const radius = oldBody ? oldBody.radius : 8;
-            if (history.length >= 2) {
-              fadingHistories.push({
-                points: history,
-                radius,
-                alpha: 1.0
-              });
-            }
             bodyHistories.delete(id);
           }
         }
@@ -655,27 +762,34 @@ function frame(now: number): void {
         // Add current positions to histories
         for (const body of fresh) {
           let history = bodyHistories.get(body.id);
+          let prevDist = 0;
+          let prevPos = body.position;
           if (!history) {
             history = [];
             bodyHistories.set(body.id, history);
+          } else if (history.length > 0) {
+            const last = history[history.length - 1];
+            prevDist = last.dist;
+            prevPos = last.pos;
           }
+
+          const stepDist = Math.hypot(body.position.x - prevPos.x, body.position.y - prevPos.y);
+          const newDist = prevDist + stepDist;
+
           history.push({
             pos: { x: body.position.x, y: body.position.y },
             vel: { x: body.velocity.x, y: body.velocity.y },
-            mass: body.mass
+            mass: body.mass,
+            dist: newDist
           });
 
           // Scale maximum history length based on body mass (large bodies get longer trails)
-          let maxLen = 15;
-          if (body.mass > 1000) maxLen = 45;
-          else if (body.mass > 100) maxLen = 30;
-          else if (body.mass < 15) maxLen = 6;
+          let maxLen = 40;
+          if (body.mass > 1000) maxLen = 120;
+          else if (body.mass > 100) maxLen = 80;
+          else if (body.mass < 15) maxLen = 20;
 
-          // Multiply max length by timescale factor to preserve the trail's physical duration at high speeds
-          const scaleFactor = Math.max(1.0, timescale);
-          const scaledMaxLen = Math.round(maxLen * scaleFactor);
-
-          while (history.length > scaledMaxLen) {
+          while (history.length > maxLen) {
             history.shift();
           }
         }
@@ -696,11 +810,15 @@ function frame(now: number): void {
               const factor = Math.max(0, 1 - dist / maxDist);
               
               if (factor > 0) {
-                const baseShake = Math.sqrt(oldB.mass) * 1.5;
-                const zoomFactor = Math.min(1.0, camera.zoom);
-                const shakeAdded = baseShake * factor * zoomFactor;
-                shakeIntensity = Math.min(40, shakeIntensity + shakeAdded);
-                audioManager.playCollision(oldB.mass, factor, camera.zoom);
+                if (settings.cameraShake) {
+                  const baseShake = Math.sqrt(oldB.mass) * 1.5;
+                  const zoomFactor = Math.min(1.0, camera.zoom);
+                  const shakeAdded = baseShake * factor * zoomFactor;
+                  shakeIntensity = Math.min(40, shakeIntensity + shakeAdded);
+                }
+                if (settings.collisionSounds) {
+                  audioManager.playCollision(oldB.mass, factor, camera.zoom);
+                }
               }
             }
           }
@@ -747,65 +865,46 @@ function frame(now: number): void {
 
   // Draw smooth, tapered, and fading historical trails for active bodies on the overlay canvas
   // Apply a 1-frame lead projection to compensate for asynchronous WebGPU compositing latency
-  const leadTime = 1.0 * FIXED_STEP * timescale;
+  const leadTime = 0.0 * FIXED_STEP * timescale;
   const dt = simTime - snapshotSimTime + leadTime;
 
   // 1. Render active trails
-  for (const body of snapshots) {
-    const history = bodyHistories.get(body.id);
-    if (!history || history.length < 2) continue;
+  if (settings.showTrails) {
+    for (const body of snapshots) {
+      const history = bodyHistories.get(body.id);
+      if (!history || history.length < 2) continue;
 
-    // Calculate gravitational acceleration on the CPU to dead-reckon curved orbits accurately
-    let ax = 0;
-    let ay = 0;
-    const G = 9500.0;
-    const SOFTENING = 12.0;
-    for (const att of snapshots) {
-      if (att.id === body.id || att.mass <= 0) continue;
-      const dx = att.position.x - body.position.x;
-      const dy = att.position.y - body.position.y;
-      const distSq = dx * dx + dy * dy + SOFTENING * SOFTENING;
-      const dist = Math.sqrt(distSq);
-      const pull = (G * att.mass) / (distSq * dist);
-      ax += dx * pull;
-      ay += dy * pull;
+      // Calculate gravitational acceleration on the CPU to dead-reckon curved orbits accurately
+      let ax = 0;
+      let ay = 0;
+      const G = 9500.0;
+      const SOFTENING = 12.0;
+      for (const att of snapshots) {
+        if (att.id === body.id || att.mass <= 0) continue;
+        const dx = att.position.x - body.position.x;
+        const dy = att.position.y - body.position.y;
+        const distSq = dx * dx + dy * dy + SOFTENING * SOFTENING;
+        const dist = Math.sqrt(distSq);
+        const pull = (G * att.mass) / (distSq * dist);
+        ax += dx * pull;
+        ay += dy * pull;
+      }
+
+      // Quadratic dead reckoning: position + velocity * dt + 0.5 * acceleration * dt^2
+      const estX = body.position.x + body.velocity.x * dt + 0.5 * ax * dt * dt;
+      const estY = body.position.y + body.velocity.y * dt + 0.5 * ay * dt * dt;
+      const estVel = {
+        x: body.velocity.x + ax * dt,
+        y: body.velocity.y + ay * dt
+      };
+
+      const baseAlpha = body.mass > 1000 ? 0.70 : 0.45;
+
+      drawSplineTrail(history, estX, estY, body.radius, body.mass, estVel, baseAlpha, 1.0);
     }
-
-    // Quadratic dead reckoning: position + velocity * dt + 0.5 * acceleration * dt^2
-    const estX = body.position.x + body.velocity.x * dt + 0.5 * ax * dt * dt;
-    const estY = body.position.y + body.velocity.y * dt + 0.5 * ay * dt * dt;
-    const estVel = {
-      x: body.velocity.x + ax * dt,
-      y: body.velocity.y + ay * dt
-    };
-
-    const baseAlpha = body.mass > 1000 ? 0.32 : 0.20;
-
-    drawSplineTrail(history, estX, estY, body.radius, body.mass, estVel, baseAlpha, 1.0);
   }
 
-  // 2. Render and update fading trails (vanished bodies)
-  for (let i = fadingHistories.length - 1; i >= 0; i--) {
-    const fade = fadingHistories[i];
-    
-    // Decrement fade opacity
-    fade.alpha -= 0.015; // slow dissolution over ~66 frames
-    if (fade.alpha <= 0) {
-      fadingHistories.splice(i, 1);
-      continue;
-    }
 
-    const points = fade.points;
-    const lastP = points[points.length - 1];
-    
-    // Project the fading trail slightly using its last velocity to keep it moving as it dies
-    const estX = lastP.pos.x + lastP.vel.x * dt;
-    const estY = lastP.pos.y + lastP.vel.y * dt;
-    
-    const baseAlpha = lastP.mass > 1000 ? 0.32 : 0.20;
-    
-    drawSplineTrail(points, estX, estY, fade.radius, lastP.mass, lastP.vel, baseAlpha, fade.alpha);
-  }
 
   if (interactionMode === "create") {
     drawOrbitPrediction();
@@ -823,7 +922,7 @@ function frame(now: number): void {
   }
   const renderCamera = { x: rx, y: ry, zoom: camera.zoom };
 
-  engine.render(renderCamera, creationPreview(now));
+  engine.render(renderCamera, creationPreview(now), settings.showGrid);
   requestAnimationFrame(frame);
 }
 
