@@ -79,6 +79,44 @@ export class BodiesSidebar {
     if (this.selectedId !== null && !allLiveIds.has(this.selectedId)) {
       this.selectedId = null;
     }
+
+    const query = this.searchQuery.trim().toLocaleLowerCase("ru-RU");
+    const visibleBodies = bodies
+      .filter((body) => !query || body.name.toLocaleLowerCase("ru-RU").includes(query))
+      .sort((a, b) => {
+        const favoriteRank = this.rank(a.id) - this.rank(b.id);
+        return favoriteRank !== 0 ? favoriteRank : a.id - b.id;
+      })
+      .slice(0, 512);
+    const visibleIds = new Set(visibleBodies.map((body) => body.id));
+
+    for (const [id, refs] of this.cards) {
+      if (!visibleIds.has(id)) {
+        refs.card.remove();
+        this.cards.delete(id);
+      }
+    }
+
+    for (const body of visibleBodies) {
+      let refs = this.cards.get(body.id);
+      if (!refs) {
+        refs = this.createCard(body);
+        this.cards.set(body.id, refs);
+        this.container.append(refs.card);
+      }
+      this.updateValues(refs, body);
+    }
+
+    this.reorder();
+    this.applySelection();
+    this.empty.textContent = bodies.length === 0
+      ? "Тела отсутствуют"
+      : visibleBodies.length === 0
+        ? "Ничего не найдено"
+        : bodies.length > visibleBodies.length
+          ? `Показано ${visibleBodies.length} из ${bodies.length}`
+          : "";
+    this.empty.hidden = visibleBodies.length > 0 && bodies.length <= visibleBodies.length;
     this.updateInspector(bodies);
   }
 
@@ -135,6 +173,14 @@ export class BodiesSidebar {
             <span class="inspect-label">Координата Y</span>
             <strong class="inspect-val inspect-val-y"></strong>
           </div>
+          <div class="inspect-row">
+            <span class="inspect-label">Вращение</span>
+            <strong class="inspect-val inspect-val-spin"></strong>
+          </div>
+          <div class="inspect-row">
+            <span class="inspect-label">Приливный режим</span>
+            <strong class="inspect-val inspect-val-tidal"></strong>
+          </div>
         </div>
         <div class="inspect-actions">
           <button class="inspect-action-btn btn-focus" type="button" title="Сфокусировать камеру">
@@ -168,6 +214,8 @@ export class BodiesSidebar {
     const speedVal = inspectContent.querySelector<HTMLElement>(".inspect-val-speed")!;
     const xVal = inspectContent.querySelector<HTMLElement>(".inspect-val-x")!;
     const yVal = inspectContent.querySelector<HTMLElement>(".inspect-val-y")!;
+    const spinVal = inspectContent.querySelector<HTMLElement>(".inspect-val-spin")!;
+    const tidalVal = inspectContent.querySelector<HTMLElement>(".inspect-val-tidal")!;
     const favBtn = inspectContent.querySelector<HTMLButtonElement>(".inspect-favorite-toggle")!;
     const nameInput = inspectContent.querySelector<HTMLInputElement>(".inspect-name-input")!;
 
@@ -179,6 +227,8 @@ export class BodiesSidebar {
     if (speedVal) speedVal.textContent = formatNumber(speed, 1);
     if (xVal) xVal.textContent = formatNumber(body.position.x, 0);
     if (yVal) yVal.textContent = formatNumber(body.position.y, 0);
+    if (spinVal) spinVal.textContent = `${formatNumber(body.spin, 2)} рад/с`;
+    if (tidalVal) tidalVal.textContent = body.tidalLocked ? "Roche lock" : "Нет";
 
     const isFav = this.favorites.has(body.id);
     favBtn.classList.toggle("is-active", isFav);

@@ -9,24 +9,35 @@ export type BodySnapshot = {
   velocity: Vec2;
   mass: number;
   radius: number;
+  spin: number;
+  tidalLocked: boolean;
   hue: number;
 };
 
 type Injection = { position: Vec2; velocity: Vec2; radius: number; mass?: number };
 
 export const BODY_COUNT = 16384;
-const BODY_FLOATS = 8;
+const BODY_FLOATS = 10;
 const BODY_BYTES = BODY_FLOATS * 4;
 const WORKGROUP_SIZE = 64;
 const HASH_BUCKET_COUNT = 8192;
-const METADATA_WORDS = HASH_BUCKET_COUNT + BODY_COUNT * 4;
+const METADATA_WORDS = HASH_BUCKET_COUNT + BODY_COUNT * 6;
 const MAX_FRAGMENT_EVENTS = BODY_COUNT / 2;
+const FRAGMENT_EVENT_BYTES = 80;
 const MAX_FRAGMENTS = 15;
 const GRID_ATTRACTOR_COUNT = 32;
 const GRID_VERTEX_CAPACITY = 524288;
 const MASS_DENSITY = 0.15;
-const MAX_ATTRACTORS = 128;
-const ATTRACTOR_THRESHOLD = 20.0;
+const TREE_DEPTH = 6;
+const TREE_LEAF_COUNT = 1 << (TREE_DEPTH * 2);
+const TREE_NODE_COUNT = (TREE_LEAF_COUNT * 4 - 1) / 3;
+const TREE_COUNTER_BYTES =
+  9 * 4
+  + TREE_LEAF_COUNT * 4 * 2
+  + (TREE_LEAF_COUNT + 1) * 4
+  + BODY_COUNT * 4
+  + TREE_NODE_COUNT * 40
+  + BODY_COUNT * 6 * 4;
 
 const computeShader = /* wgsl */ `
   const BODY_COUNT: u32 = ${BODY_COUNT}u;
@@ -34,18 +45,29 @@ const computeShader = /* wgsl */ `
   const MAX_FRAGMENT_EVENTS: u32 = ${MAX_FRAGMENT_EVENTS}u;
   const MAX_FRAGMENTS: u32 = ${MAX_FRAGMENTS}u;
   const WORKGROUP_SIZE: u32 = ${WORKGROUP_SIZE}u;
-  const MAX_ATTRACTORS: u32 = ${MAX_ATTRACTORS}u;
-  const ATTRACTOR_THRESHOLD: f32 = ${ATTRACTOR_THRESHOLD};
+  const TREE_DEPTH: u32 = ${TREE_DEPTH}u;
+  const TREE_GRID_SIZE: u32 = ${1 << TREE_DEPTH}u;
+  const TREE_LEAF_COUNT: u32 = ${TREE_LEAF_COUNT}u;
+  const TREE_NODE_COUNT: u32 = ${TREE_NODE_COUNT}u;
+  const TREE_LEAF_OFFSET: u32 = ${(TREE_LEAF_COUNT - 1) / 3}u;
+  const TREE_INVALID_NODE: u32 = 0xffffffffu;
+  const TREE_THETA: f32 = 0.62;
   const G: f32 = 9500.0;
   const SOFTENING: f32 = 12.0;
   const DENSITY: f32 = ${MASS_DENSITY};
-  const MERGE_RATIO: f32 = 2.75;
   const FRAGMENT_SPEED: f32 = 62.0;
   const MIN_FRAGMENT_MASS: f32 = 2.0;
   const FRAGMENT_REARM_TIME: f32 = 1.2;
-  const MAX_FRAGMENT_GENERATION: f32 = 2.0;
-  const RESTITUTION: f32 = 0.35;
-  const POSITION_CORRECTION: f32 = 0.5;
+  const MAX_FRAGMENT_GENERATION: f32 = 3.0;
+  const NORMAL_RESTITUTION: f32 = 0.28;
+  const TANGENTIAL_RESTITUTION: f32 = 0.18;
+  const CONTACT_FRICTION: f32 = 0.42;
+  const POSITION_CORRECTION: f32 = 0.72;
+  const MERGE_BINDING_FRACTION: f32 = 0.62;
+  const ROCHE_COEFFICIENT: f32 = 2.44;
+  const ROCHE_PRIMARY_MASS_RATIO: f32 = 8.0;
+  const ROCHE_LOCK_TIME: f32 = 0.75;
+  const ROCHE_MIN_DENSITY: f32 = DENSITY * 0.5;
   const COMPACT_DENSITY_ENTER: f32 = DENSITY * 64.0;
   const COMPACT_DENSITY_FULL: f32 = DENSITY * 512.0;
   const CELL_SIZE: f32 = 512.0;
@@ -53,15 +75,19 @@ const computeShader = /* wgsl */ `
   const HASH_NEXT_OFFSET: u32 = HASH_HEAD_OFFSET + HASH_BUCKET_COUNT;
   const CANDIDATE_OFFSET: u32 = HASH_NEXT_OFFSET + BODY_COUNT;
   const ACCEPTED_OFFSET: u32 = CANDIDATE_OFFSET + BODY_COUNT;
-  const SLOT_STATE_OFFSET: u32 = ACCEPTED_OFFSET + BODY_COUNT;
+  const TIDAL_EVENT_OFFSET: u32 = ACCEPTED_OFFSET + BODY_COUNT;
+  const SURFACE_PRIMARY_OFFSET: u32 = TIDAL_EVENT_OFFSET + BODY_COUNT;
+  const SLOT_STATE_OFFSET: u32 = SURFACE_PRIMARY_OFFSET + BODY_COUNT;
 
   struct Body {
     position: vec2<f32>,
     velocity: vec2<f32>,
     mass: f32,
     radius: f32,
-    // x: fragmentation protection deadline, y: resolved fragmentation generation.
-    previous: vec2<f32>,
+    spin: f32,
+    tidalLockUntil: f32,
+    // x: fragmentation protection deadline, y: fragmentation generation.
+    fragmentation: vec2<f32>,
   };
 
   struct SimParams {
@@ -81,10 +107,25 @@ const computeShader = /* wgsl */ `
     normalSpeed: f32,
     tangentSpeed: f32,
     obliquity: f32,
+    angularMomentum: f32,
+    tidalLockUntil: f32,
     count: u32,
     seed: u32,
     generation: f32,
-    _pad: u32,
+    kind: u32,
+    shearRate: f32,
+    _pad: f32,
+  };
+
+  struct TreeNode {
+    centerMass: vec2<f32>,
+    cellCenter: vec2<f32>,
+    mass: f32,
+    size: f32,
+    childBase: u32,
+    bodyCount: u32,
+    maxRocheReach: f32,
+    _pad: f32,
   };
 
   struct Counters {
@@ -92,8 +133,22 @@ const computeShader = /* wgsl */ `
     events: atomic<u32>,
     reservedGrowth: atomic<u32>,
     maxRadiusBits: atomic<u32>,
-    attractorCount: atomic<u32>,
-    attractorIndices: array<u32, ${MAX_ATTRACTORS}>,
+    treeMinX: atomic<u32>,
+    treeMinY: atomic<u32>,
+    treeMaxX: atomic<u32>,
+    treeMaxY: atomic<u32>,
+    treeActiveCount: atomic<u32>,
+    treeBucketCounts: array<atomic<u32>, ${TREE_LEAF_COUNT}>,
+    treeBucketCursors: array<atomic<u32>, ${TREE_LEAF_COUNT}>,
+    treeBucketOffsets: array<u32, ${TREE_LEAF_COUNT + 1}>,
+    treeSortedIndices: array<u32, ${BODY_COUNT}>,
+    treeNodes: array<TreeNode, ${TREE_NODE_COUNT}>,
+    surfaceMass: array<atomic<u32>, ${BODY_COUNT}>,
+    surfaceMomentX: array<atomic<u32>, ${BODY_COUNT}>,
+    surfaceMomentY: array<atomic<u32>, ${BODY_COUNT}>,
+    surfaceMomentumX: array<atomic<u32>, ${BODY_COUNT}>,
+    surfaceMomentumY: array<atomic<u32>, ${BODY_COUNT}>,
+    surfaceAngularMomentum: array<atomic<u32>, ${BODY_COUNT}>,
   };
 
   @group(0) @binding(0) var<storage, read> currentBodies: array<Body>;
@@ -105,10 +160,16 @@ const computeShader = /* wgsl */ `
   @group(0) @binding(6) var<storage, read_write> fragmentEvents: array<FragmentEvent>;
   @group(0) @binding(7) var<storage, read_write> counters: Counters;
 
-  var<workgroup> bodyTile: array<Body, ${WORKGROUP_SIZE}>;
-
   fn inactiveBody() -> Body {
-    return Body(vec2<f32>(0.0), vec2<f32>(0.0), 0.0, 0.0, vec2<f32>(0.0));
+    return Body(
+      vec2<f32>(0.0),
+      vec2<f32>(0.0),
+      0.0,
+      0.0,
+      0.0,
+      0.0,
+      vec2<f32>(0.0),
+    );
   }
 
   fn safeDirection(value: vec2<f32>, fallback: vec2<f32>) -> vec2<f32> {
@@ -132,6 +193,16 @@ const computeShader = /* wgsl */ `
 
   fn storeSigned(offset: u32, index: u32, value: i32) {
     atomicStore(&metadata[offset + index], bitcast<u32>(value));
+  }
+
+  fn atomicAddFloat(destination: ptr<storage, atomic<u32>, read_write>, value: f32) {
+    var expected = atomicLoad(destination);
+    loop {
+      let next = bitcast<u32>(bitcast<f32>(expected) + value);
+      let result = atomicCompareExchangeWeak(destination, expected, next);
+      if (result.exchanged) { return; }
+      expected = result.old_value;
+    }
   }
 
   fn disruptionThreshold(totalMass: f32) -> f32 {
@@ -176,6 +247,54 @@ const computeShader = /* wgsl */ `
     return body.mass / max(body.radius * body.radius, 0.0001);
   }
 
+  fn cross2(a: vec2<f32>, b: vec2<f32>) -> f32 {
+    return a.x * b.y - a.y * b.x;
+  }
+
+  fn perpendicular(value: vec2<f32>) -> vec2<f32> {
+    return vec2<f32>(-value.y, value.x);
+  }
+
+  fn momentOfInertia(body: Body) -> f32 {
+    return 0.5 * body.mass * body.radius * body.radius;
+  }
+
+  fn relativeKineticEnergy(sourceBody: Body, other: Body) -> f32 {
+    let totalMass = sourceBody.mass + other.mass;
+    let reducedMass = sourceBody.mass * other.mass / max(totalMass, 0.0001);
+    let relativeVelocity = other.velocity - sourceBody.velocity;
+    return 0.5 * reducedMass * dot(relativeVelocity, relativeVelocity);
+  }
+
+  fn pairAngularMomentum(
+    sourceBody: Body,
+    other: Body,
+    center: vec2<f32>,
+    centerVelocity: vec2<f32>,
+  ) -> f32 {
+    let sourceOrbital = cross2(
+      sourceBody.position - center,
+      (sourceBody.velocity - centerVelocity) * sourceBody.mass,
+    );
+    let otherOrbital = cross2(
+      other.position - center,
+      (other.velocity - centerVelocity) * other.mass,
+    );
+    return sourceOrbital + otherOrbital
+      + momentOfInertia(sourceBody) * sourceBody.spin
+      + momentOfInertia(other) * other.spin;
+  }
+
+  fn rocheLimit(primary: Body, satellite: Body) -> f32 {
+    let densityRatio = max(bodyDensity(primary) / max(bodyDensity(satellite), ROCHE_MIN_DENSITY), 1.0);
+    return ROCHE_COEFFICIENT * primary.radius * pow(densityRatio, 1.0 / 3.0);
+  }
+
+  fn maximumRocheReach(primary: Body) -> f32 {
+    let densityRatio = max(bodyDensity(primary) / ROCHE_MIN_DENSITY, 1.0);
+    return ROCHE_COEFFICIENT * primary.radius * pow(densityRatio, 1.0 / 3.0);
+  }
+
   fn mergedRadius(sourceBody: Body, other: Body, totalMass: f32) -> f32 {
     let inheritedDensity = max(max(bodyDensity(sourceBody), bodyDensity(other)), DENSITY);
     let normalRadius = sqrt(totalMass / DENSITY);
@@ -194,88 +313,554 @@ const computeShader = /* wgsl */ `
     }
   }
 
+  fn floatToOrdered(value: f32) -> u32 {
+    let bits = bitcast<u32>(value);
+    if ((bits & 0x80000000u) != 0u) { return ~bits; }
+    return bits ^ 0x80000000u;
+  }
+
+  fn orderedToFloat(value: u32) -> f32 {
+    let bits = select(~value, value ^ 0x80000000u, (value & 0x80000000u) != 0u);
+    return bitcast<f32>(bits);
+  }
+
+  struct TreeFrame {
+    minimum: vec2<f32>,
+    size: f32,
+    _pad: f32,
+  };
+
+  fn currentTreeFrame() -> TreeFrame {
+    if (atomicLoad(&counters.treeActiveCount) == 0u) {
+      return TreeFrame(vec2<f32>(-0.5), 1.0, 0.0);
+    }
+    let minimum = vec2<f32>(
+      orderedToFloat(atomicLoad(&counters.treeMinX)),
+      orderedToFloat(atomicLoad(&counters.treeMinY)),
+    );
+    let maximum = vec2<f32>(
+      orderedToFloat(atomicLoad(&counters.treeMaxX)),
+      orderedToFloat(atomicLoad(&counters.treeMaxY)),
+    );
+    let center = (minimum + maximum) * 0.5;
+    let extent = max(maximum.x - minimum.x, maximum.y - minimum.y);
+    let padding = max(0.001, extent * 0.001);
+    let size = max(1.0, extent + padding * 2.0);
+    return TreeFrame(center - vec2<f32>(size * 0.5), size, 0.0);
+  }
+
+  fn spreadMortonBits(value: u32) -> u32 {
+    var result = value & 0xffu;
+    result = (result | (result << 4u)) & 0x0f0fu;
+    result = (result | (result << 2u)) & 0x3333u;
+    result = (result | (result << 1u)) & 0x5555u;
+    return result;
+  }
+
+  fn compactMortonBits(value: u32) -> u32 {
+    var result = value & 0x5555u;
+    result = (result | (result >> 1u)) & 0x3333u;
+    result = (result | (result >> 2u)) & 0x0f0fu;
+    result = (result | (result >> 4u)) & 0x00ffu;
+    return result;
+  }
+
+  fn mortonCode(position: vec2<f32>) -> u32 {
+    let frame = currentTreeFrame();
+    let normalized = clamp((position - frame.minimum) / frame.size, vec2<f32>(0.0), vec2<f32>(0.999999));
+    let cell = vec2<u32>(floor(normalized * f32(TREE_GRID_SIZE)));
+    return spreadMortonBits(cell.x) | (spreadMortonBits(cell.y) << 1u);
+  }
+
+  fn levelOffset(level: u32) -> u32 {
+    return ((1u << (2u * level)) - 1u) / 3u;
+  }
+
+  fn gravityBody(index: u32, useDrift: bool) -> Body {
+    if (useDrift) { return driftBodies[index]; }
+    return currentBodies[index];
+  }
+
+  fn accumulateBodyGravity(
+    sourceBody: Body,
+    other: Body,
+    acceleration: ptr<function, vec2<f32>>,
+  ) {
+    let delta = other.position - sourceBody.position;
+    let centerDistance = length(delta);
+    let physicalContainment =
+      (other.mass > sourceBody.mass && centerDistance < other.radius)
+      || (sourceBody.mass > other.mass && centerDistance < sourceBody.radius);
+    if (physicalContainment) {
+      return;
+    }
+    let distanceSquared = dot(delta, delta) + SOFTENING * SOFTENING;
+    let inverseDistance = inverseSqrt(distanceSquared);
+    *acceleration += G * other.mass * delta * inverseDistance * inverseDistance * inverseDistance;
+  }
+
+  fn treeAcceleration(sourceBody: Body, sourceIndex: u32, useDrift: bool) -> vec2<f32> {
+    if (atomicLoad(&counters.treeActiveCount) <= 1u) { return vec2<f32>(0.0); }
+    var acceleration = vec2<f32>(0.0);
+    var stack: array<u32, 32>;
+    var stackSize = 1u;
+    stack[0] = 0u;
+
+    loop {
+      if (stackSize == 0u) { break; }
+      stackSize -= 1u;
+      let nodeIndex = stack[stackSize];
+      let node = counters.treeNodes[nodeIndex];
+      if (node.mass <= 0.0) { continue; }
+
+      if (node.childBase == TREE_INVALID_NODE) {
+        let leafCode = nodeIndex - TREE_LEAF_OFFSET;
+        let start = counters.treeBucketOffsets[leafCode];
+        let end = counters.treeBucketOffsets[leafCode + 1u];
+        for (var cursor = start; cursor < end; cursor += 1u) {
+          let otherIndex = counters.treeSortedIndices[cursor];
+          if (otherIndex != sourceIndex) {
+            let other = gravityBody(otherIndex, useDrift);
+            if (other.mass > 0.0) {
+              accumulateBodyGravity(sourceBody, other, &acceleration);
+            }
+          }
+        }
+        continue;
+      }
+
+      let delta = node.centerMass - sourceBody.position;
+      let distance = length(delta);
+      let halfSize = node.size * 0.5;
+      let containsSource = all(abs(sourceBody.position - node.cellCenter) <= vec2<f32>(halfSize + 0.0001));
+      let nodeAabbDistance = length(max(
+        abs(sourceBody.position - node.cellCenter) - vec2<f32>(halfSize),
+        vec2<f32>(0.0),
+      ));
+      let exactNearFieldRadius = max(CELL_SIZE * 1.5, sourceBody.radius * 4.0);
+      if (
+        !containsSource
+        && nodeAabbDistance > exactNearFieldRadius
+        && node.size / max(distance, 0.0001) < TREE_THETA
+      ) {
+        let distanceSquared = dot(delta, delta) + SOFTENING * SOFTENING;
+        let inverseDistance = inverseSqrt(distanceSquared);
+        acceleration += G * node.mass * delta * inverseDistance * inverseDistance * inverseDistance;
+        continue;
+      }
+
+      for (var child = 0u; child < 4u; child += 1u) {
+        if (stackSize < 32u) {
+          stack[stackSize] = node.childBase + child;
+          stackSize += 1u;
+        }
+      }
+    }
+    return acceleration;
+  }
+
   @compute @workgroup_size(${WORKGROUP_SIZE})
-  fn collectAttractors(@builtin(global_invocation_id) id: vec3<u32>) {
+  fn clearTree(@builtin(global_invocation_id) id: vec3<u32>) {
+    let index = id.x;
+    if (index < TREE_LEAF_COUNT) {
+      atomicStore(&counters.treeBucketCounts[index], 0u);
+      atomicStore(&counters.treeBucketCursors[index], 0u);
+    }
+    if (index == 0u) {
+      atomicStore(&counters.treeMinX, 0xffffffffu);
+      atomicStore(&counters.treeMinY, 0xffffffffu);
+      atomicStore(&counters.treeMaxX, 0u);
+      atomicStore(&counters.treeMaxY, 0u);
+      atomicStore(&counters.treeActiveCount, 0u);
+    }
+  }
+
+  fn collectTreeBounds(body: Body) {
+    if (body.mass <= 0.0) { return; }
+    atomicMin(&counters.treeMinX, floatToOrdered(body.position.x));
+    atomicMin(&counters.treeMinY, floatToOrdered(body.position.y));
+    atomicMax(&counters.treeMaxX, floatToOrdered(body.position.x));
+    atomicMax(&counters.treeMaxY, floatToOrdered(body.position.y));
+    atomicAdd(&counters.treeActiveCount, 1u);
+  }
+
+  @compute @workgroup_size(${WORKGROUP_SIZE})
+  fn collectCurrentTreeBounds(@builtin(global_invocation_id) id: vec3<u32>) {
+    if (id.x < BODY_COUNT) { collectTreeBounds(currentBodies[id.x]); }
+  }
+
+  @compute @workgroup_size(${WORKGROUP_SIZE})
+  fn collectDriftTreeBounds(@builtin(global_invocation_id) id: vec3<u32>) {
+    if (id.x < BODY_COUNT) { collectTreeBounds(driftBodies[id.x]); }
+  }
+
+  fn countTreeBody(body: Body) {
+    if (body.mass > 0.0) {
+      atomicAdd(&counters.treeBucketCounts[mortonCode(body.position)], 1u);
+    }
+  }
+
+  @compute @workgroup_size(${WORKGROUP_SIZE})
+  fn countCurrentMortonCodes(@builtin(global_invocation_id) id: vec3<u32>) {
+    if (id.x < BODY_COUNT) { countTreeBody(currentBodies[id.x]); }
+  }
+
+  @compute @workgroup_size(${WORKGROUP_SIZE})
+  fn countDriftMortonCodes(@builtin(global_invocation_id) id: vec3<u32>) {
+    if (id.x < BODY_COUNT) { countTreeBody(driftBodies[id.x]); }
+  }
+
+  @compute @workgroup_size(1)
+  fn prefixTreeBuckets() {
+    var offset = 0u;
+    for (var bucket = 0u; bucket < TREE_LEAF_COUNT; bucket += 1u) {
+      counters.treeBucketOffsets[bucket] = offset;
+      atomicStore(&counters.treeBucketCursors[bucket], offset);
+      offset += atomicLoad(&counters.treeBucketCounts[bucket]);
+    }
+    counters.treeBucketOffsets[TREE_LEAF_COUNT] = offset;
+  }
+
+  fn scatterTreeBody(body: Body, bodyIndex: u32) {
+    if (body.mass <= 0.0) { return; }
+    let code = mortonCode(body.position);
+    let sortedSlot = atomicAdd(&counters.treeBucketCursors[code], 1u);
+    counters.treeSortedIndices[sortedSlot] = bodyIndex;
+  }
+
+  @compute @workgroup_size(${WORKGROUP_SIZE})
+  fn scatterCurrentMortonCodes(@builtin(global_invocation_id) id: vec3<u32>) {
+    if (id.x < BODY_COUNT) { scatterTreeBody(currentBodies[id.x], id.x); }
+  }
+
+  @compute @workgroup_size(${WORKGROUP_SIZE})
+  fn scatterDriftMortonCodes(@builtin(global_invocation_id) id: vec3<u32>) {
+    if (id.x < BODY_COUNT) { scatterTreeBody(driftBodies[id.x], id.x); }
+  }
+
+  fn buildTreeLeaf(code: u32, useDrift: bool) {
+    let start = counters.treeBucketOffsets[code];
+    let end = counters.treeBucketOffsets[code + 1u];
+    var totalMass = 0.0;
+    var weightedPosition = vec2<f32>(0.0);
+    var maxRocheReach = 0.0;
+    for (var cursor = start; cursor < end; cursor += 1u) {
+      let body = gravityBody(counters.treeSortedIndices[cursor], useDrift);
+      totalMass += body.mass;
+      weightedPosition += body.position * body.mass;
+      maxRocheReach = max(maxRocheReach, maximumRocheReach(body));
+    }
+    let frame = currentTreeFrame();
+    let cellSize = frame.size / f32(TREE_GRID_SIZE);
+    let cell = vec2<u32>(compactMortonBits(code), compactMortonBits(code >> 1u));
+    let cellCenter = frame.minimum + (vec2<f32>(cell) + vec2<f32>(0.5)) * cellSize;
+    let centerMass = select(cellCenter, weightedPosition / totalMass, totalMass > 0.0);
+    counters.treeNodes[TREE_LEAF_OFFSET + code] = TreeNode(
+      centerMass,
+      cellCenter,
+      totalMass,
+      cellSize,
+      TREE_INVALID_NODE,
+      end - start,
+      maxRocheReach,
+      0.0,
+    );
+  }
+
+  @compute @workgroup_size(${WORKGROUP_SIZE})
+  fn buildCurrentTreeLeaves(@builtin(global_invocation_id) id: vec3<u32>) {
+    if (id.x < TREE_LEAF_COUNT) { buildTreeLeaf(id.x, false); }
+  }
+
+  @compute @workgroup_size(${WORKGROUP_SIZE})
+  fn buildDriftTreeLeaves(@builtin(global_invocation_id) id: vec3<u32>) {
+    if (id.x < TREE_LEAF_COUNT) { buildTreeLeaf(id.x, true); }
+  }
+
+  @compute @workgroup_size(256)
+  fn buildTreeHierarchy(@builtin(local_invocation_id) localId: vec3<u32>) {
+    var level = i32(TREE_DEPTH) - 1;
+    loop {
+      let levelValue = u32(level);
+      let count = 1u << (2u * levelValue);
+      let offset = levelOffset(levelValue);
+      let childOffset = levelOffset(levelValue + 1u);
+      for (var local = localId.x; local < count; local += 256u) {
+        let childBase = childOffset + local * 4u;
+        var totalMass = 0.0;
+        var weightedPosition = vec2<f32>(0.0);
+        var bodyCount = 0u;
+        var maxRocheReach = 0.0;
+        for (var child = 0u; child < 4u; child += 1u) {
+          let childNode = counters.treeNodes[childBase + child];
+          totalMass += childNode.mass;
+          weightedPosition += childNode.centerMass * childNode.mass;
+          bodyCount += childNode.bodyCount;
+          maxRocheReach = max(maxRocheReach, childNode.maxRocheReach);
+        }
+        let firstChild = counters.treeNodes[childBase];
+        let lastChild = counters.treeNodes[childBase + 3u];
+        let cellCenter = (firstChild.cellCenter + lastChild.cellCenter) * 0.5;
+        let centerMass = select(cellCenter, weightedPosition / totalMass, totalMass > 0.0);
+        counters.treeNodes[offset + local] = TreeNode(
+          centerMass,
+          cellCenter,
+          totalMass,
+          firstChild.size * 2.0,
+          childBase,
+          bodyCount,
+          maxRocheReach,
+          0.0,
+        );
+      }
+      storageBarrier();
+      workgroupBarrier();
+      if (level == 0) { break; }
+      level -= 1;
+    }
+  }
+
+  @compute @workgroup_size(${WORKGROUP_SIZE})
+  fn clearSurfaceAccretion(@builtin(global_invocation_id) id: vec3<u32>) {
+    let index = id.x;
+    if (index < HASH_BUCKET_COUNT) {
+      storeSigned(HASH_HEAD_OFFSET, index, -1);
+    }
+    if (index < BODY_COUNT) {
+      storeSigned(HASH_NEXT_OFFSET, index, -1);
+      storeSigned(SURFACE_PRIMARY_OFFSET, index, -1);
+      atomicStore(&counters.surfaceMass[index], 0u);
+      atomicStore(&counters.surfaceMomentX[index], 0u);
+      atomicStore(&counters.surfaceMomentY[index], 0u);
+      atomicStore(&counters.surfaceMomentumX[index], 0u);
+      atomicStore(&counters.surfaceMomentumY[index], 0u);
+      atomicStore(&counters.surfaceAngularMomentum[index], 0u);
+    }
+    if (index == 0u) {
+      atomicStore(&counters.maxRadiusBits, 0u);
+    }
+  }
+
+  @compute @workgroup_size(${WORKGROUP_SIZE})
+  fn buildCurrentSpatialHash(@builtin(global_invocation_id) id: vec3<u32>) {
     let index = id.x;
     if (index >= BODY_COUNT) { return; }
     let body = currentBodies[index];
-    if (body.mass > 0.0 && (body.previous.y == 0.0 || body.mass >= ATTRACTOR_THRESHOLD)) {
-      let slot = atomicAdd(&counters.attractorCount, 1u);
-      if (slot < MAX_ATTRACTORS) {
-        counters.attractorIndices[slot] = index;
-      }
-    }
+    if (body.mass <= 0.0) { return; }
+    atomicMax(&counters.maxRadiusBits, bitcast<u32>(body.radius));
+    let bucket = hashCell(cellFor(body.position));
+    let previousIndex = atomicExchange(&metadata[HASH_HEAD_OFFSET + bucket], index);
+    storeSigned(HASH_NEXT_OFFSET, index, bitcast<i32>(previousIndex));
   }
 
-  @compute @workgroup_size(${WORKGROUP_SIZE})
-  fn integrateDrift(
-    @builtin(global_invocation_id) globalId: vec3<u32>,
-    @builtin(local_invocation_id) localId: vec3<u32>,
-  ) {
-    let index = globalId.x;
-    let valid = index < BODY_COUNT;
-    var currentBody = inactiveBody();
-    if (valid) { currentBody = currentBodies[index]; }
-    let isActive = valid && currentBody.mass > 0.0;
-    var acceleration = vec2<f32>(0.0);
+  fn containingPrimary(index: u32, sourceBody: Body) -> i32 {
+    let ownCell = cellFor(sourceBody.position);
+    let maximumRadius = bitcast<f32>(atomicLoad(&counters.maxRadiusBits));
+    let cellReach = max(1, i32(ceil((sourceBody.radius + maximumRadius) / CELL_SIZE)));
+    var primary = -1;
+    var primaryMass = sourceBody.mass;
 
-    if (isActive) {
-      let attractorCount = min(atomicLoad(&counters.attractorCount), MAX_ATTRACTORS);
-      for (var i = 0u; i < attractorCount; i += 1u) {
-        let otherIndex = counters.attractorIndices[i];
-        if (otherIndex != index) {
+    for (var cellY = -cellReach; cellY <= cellReach; cellY += 1) {
+      for (var cellX = -cellReach; cellX <= cellReach; cellX += 1) {
+        let targetCell = ownCell + vec2<i32>(cellX, cellY);
+        var cursor = loadSigned(HASH_HEAD_OFFSET, hashCell(targetCell));
+        var guard = 0u;
+        loop {
+          if (cursor < 0 || guard >= BODY_COUNT) { break; }
+          let otherIndex = u32(cursor);
           let other = currentBodies[otherIndex];
-          if (other.mass > 0.0) {
-            let delta = other.position - currentBody.position;
-            let distanceSquared = dot(delta, delta) + SOFTENING * SOFTENING;
-            let inverseDistance = inverseSqrt(distanceSquared);
-            acceleration += G * other.mass * delta * inverseDistance * inverseDistance * inverseDistance;
+          if (
+            otherIndex != index
+            && other.mass > primaryMass
+            && other.mass > 0.0
+            && all(cellFor(other.position) == targetCell)
+          ) {
+            let centerDistanceSquared = dot(
+              sourceBody.position - other.position,
+              sourceBody.position - other.position,
+            );
+            let sumRadii = other.radius + sourceBody.radius;
+            if (centerDistanceSquared <= sumRadii * sumRadii) {
+              primary = cursor;
+              primaryMass = other.mass;
+            }
           }
+          cursor = loadSigned(HASH_NEXT_OFFSET, otherIndex);
+          guard += 1u;
         }
       }
     }
-
-    if (valid) {
-      if (isActive && index != u32(params.lockedSlot)) {
-        currentBody.velocity += 0.5 * acceleration * params.dt;
-        currentBody.position += currentBody.velocity * params.dt;
-      }
-      driftBodies[index] = currentBody;
-    }
+    return primary;
   }
 
   @compute @workgroup_size(${WORKGROUP_SIZE})
-  fn integrateKick(
-    @builtin(global_invocation_id) globalId: vec3<u32>,
-    @builtin(local_invocation_id) localId: vec3<u32>,
-  ) {
-    let index = globalId.x;
-    let valid = index < BODY_COUNT;
-    var currentBody = inactiveBody();
-    if (valid) { currentBody = driftBodies[index]; }
-    let isActive = valid && currentBody.mass > 0.0;
-    var acceleration = vec2<f32>(0.0);
+  fn detectSurfacePrimaries(@builtin(global_invocation_id) id: vec3<u32>) {
+    let index = id.x;
+    if (index >= BODY_COUNT) { return; }
+    let body = currentBodies[index];
+    if (body.mass <= 0.0) { return; }
+    storeSigned(SURFACE_PRIMARY_OFFSET, index, containingPrimary(index, body));
+  }
 
-    if (isActive) {
-      let attractorCount = min(atomicLoad(&counters.attractorCount), MAX_ATTRACTORS);
-      for (var i = 0u; i < attractorCount; i += 1u) {
-        let otherIndex = counters.attractorIndices[i];
-        if (otherIndex != index) {
-          let other = driftBodies[otherIndex];
-          if (other.mass > 0.0) {
-            let delta = other.position - currentBody.position;
-            let distanceSquared = dot(delta, delta) + SOFTENING * SOFTENING;
-            let inverseDistance = inverseSqrt(distanceSquared);
-            acceleration += G * other.mass * delta * inverseDistance * inverseDistance * inverseDistance;
+  @compute @workgroup_size(${WORKGROUP_SIZE})
+  fn accumulateSurfaceAccretion(@builtin(global_invocation_id) id: vec3<u32>) {
+    let index = id.x;
+    if (index >= BODY_COUNT) { return; }
+    let sourceBody = currentBodies[index];
+    if (sourceBody.mass <= 0.0) { return; }
+    var primaryValue = loadSigned(SURFACE_PRIMARY_OFFSET, index);
+    if (primaryValue < 0) { return; }
+
+    // Resolve nested containment before accumulating. This prevents mass loss
+    // when a moon and its dust are simultaneously inside a larger planet.
+    for (var depth = 0u; depth < 16u; depth += 1u) {
+      let nextValue = loadSigned(SURFACE_PRIMARY_OFFSET, u32(primaryValue));
+      if (nextValue < 0 || nextValue == primaryValue) { break; }
+      primaryValue = nextValue;
+    }
+    let primary = u32(primaryValue);
+    storeSigned(SURFACE_PRIMARY_OFFSET, index, primaryValue);
+
+    let momentum = sourceBody.velocity * sourceBody.mass;
+    let globalAngularMomentum =
+      cross2(sourceBody.position, momentum) + momentOfInertia(sourceBody) * sourceBody.spin;
+    atomicAddFloat(&counters.surfaceMass[primary], sourceBody.mass);
+    atomicAddFloat(&counters.surfaceMomentX[primary], sourceBody.position.x * sourceBody.mass);
+    atomicAddFloat(&counters.surfaceMomentY[primary], sourceBody.position.y * sourceBody.mass);
+    atomicAddFloat(&counters.surfaceMomentumX[primary], momentum.x);
+    atomicAddFloat(&counters.surfaceMomentumY[primary], momentum.y);
+    atomicAddFloat(&counters.surfaceAngularMomentum[primary], globalAngularMomentum);
+  }
+
+  @compute @workgroup_size(${WORKGROUP_SIZE})
+  fn resolveSurfaceAccretion(@builtin(global_invocation_id) id: vec3<u32>) {
+    let index = id.x;
+    if (index >= BODY_COUNT) { return; }
+    var body = currentBodies[index];
+    if (body.mass <= 0.0) {
+      outputBodies[index] = body;
+      return;
+    }
+    if (loadSigned(SURFACE_PRIMARY_OFFSET, index) >= 0) {
+      outputBodies[index] = inactiveBody();
+      return;
+    }
+
+    let incomingMass = bitcast<f32>(atomicLoad(&counters.surfaceMass[index]));
+    if (incomingMass <= 0.0) {
+      outputBodies[index] = body;
+      return;
+    }
+
+    let originalMass = body.mass;
+    let originalMomentum = body.velocity * originalMass;
+    let originalGlobalAngularMomentum =
+      cross2(body.position, originalMomentum) + momentOfInertia(body) * body.spin;
+    let totalMass = originalMass + incomingMass;
+    let totalMoment = body.position * originalMass + vec2<f32>(
+      bitcast<f32>(atomicLoad(&counters.surfaceMomentX[index])),
+      bitcast<f32>(atomicLoad(&counters.surfaceMomentY[index])),
+    );
+    let totalMomentum = originalMomentum + vec2<f32>(
+      bitcast<f32>(atomicLoad(&counters.surfaceMomentumX[index])),
+      bitcast<f32>(atomicLoad(&counters.surfaceMomentumY[index])),
+    );
+    let totalGlobalAngularMomentum = originalGlobalAngularMomentum
+      + bitcast<f32>(atomicLoad(&counters.surfaceAngularMomentum[index]));
+    let inheritedDensity = max(bodyDensity(body), DENSITY);
+    body.position = totalMoment / totalMass;
+    body.velocity = totalMomentum / totalMass;
+    body.mass = totalMass;
+    body.radius = sqrt(totalMass / inheritedDensity);
+    body.spin = (
+      totalGlobalAngularMomentum - cross2(body.position, totalMomentum)
+    ) / max(momentOfInertia(body), 0.0001);
+    outputBodies[index] = body;
+  }
+
+  @compute @workgroup_size(${WORKGROUP_SIZE})
+  fn syncSurfaceSlotState(@builtin(global_invocation_id) id: vec3<u32>) {
+    let index = id.x;
+    if (index >= BODY_COUNT) { return; }
+    atomicStore(&metadata[SLOT_STATE_OFFSET + index], select(0u, 1u, outputBodies[index].mass > 0.0));
+  }
+
+  @compute @workgroup_size(${WORKGROUP_SIZE})
+  fn integrateDrift(@builtin(global_invocation_id) globalId: vec3<u32>) {
+    let index = globalId.x;
+    if (index >= BODY_COUNT) { return; }
+    var currentBody = currentBodies[index];
+    if (currentBody.mass > 0.0 && index != u32(params.lockedSlot)) {
+      let acceleration = treeAcceleration(currentBody, index, false);
+      currentBody.velocity += 0.5 * acceleration * params.dt;
+      currentBody.position += currentBody.velocity * params.dt;
+    }
+    driftBodies[index] = currentBody;
+  }
+
+  @compute @workgroup_size(${WORKGROUP_SIZE})
+  fn integrateKick(@builtin(global_invocation_id) globalId: vec3<u32>) {
+    let index = globalId.x;
+    if (index >= BODY_COUNT) { return; }
+    var currentBody = driftBodies[index];
+    if (currentBody.mass > 0.0 && index != u32(params.lockedSlot)) {
+      currentBody.velocity += 0.5 * treeAcceleration(currentBody, index, true) * params.dt;
+    }
+    kickBodies[index] = currentBody;
+  }
+
+  struct RocheResult {
+    primaryIndex: u32,
+    ratio: f32,
+  };
+
+  fn strongestRochePrimary(sourceBody: Body, sourceIndex: u32) -> RocheResult {
+    var result = RocheResult(BODY_COUNT, 0.0);
+    var stack: array<u32, 32>;
+    var stackSize = 1u;
+    stack[0] = 0u;
+
+    loop {
+      if (stackSize == 0u) { break; }
+      stackSize -= 1u;
+      let nodeIndex = stack[stackSize];
+      let node = counters.treeNodes[nodeIndex];
+      if (node.mass <= 0.0 || node.maxRocheReach <= 0.0) { continue; }
+
+      let halfSize = node.size * 0.5;
+      let nodeDistance = length(max(
+        abs(sourceBody.position - node.cellCenter) - vec2<f32>(halfSize),
+        vec2<f32>(0.0),
+      ));
+      if (nodeDistance > node.maxRocheReach) { continue; }
+
+      if (node.childBase == TREE_INVALID_NODE) {
+        let leafCode = nodeIndex - TREE_LEAF_OFFSET;
+        let start = counters.treeBucketOffsets[leafCode];
+        let end = counters.treeBucketOffsets[leafCode + 1u];
+        for (var cursor = start; cursor < end; cursor += 1u) {
+          let primaryIndex = counters.treeSortedIndices[cursor];
+          if (primaryIndex == sourceIndex) { continue; }
+          let primary = driftBodies[primaryIndex];
+          if (primary.mass < sourceBody.mass * ROCHE_PRIMARY_MASS_RATIO) { continue; }
+          let separation = length(primary.position - sourceBody.position);
+          let limit = rocheLimit(primary, sourceBody);
+          let ratio = limit / max(separation, 0.0001);
+          if (ratio > result.ratio) {
+            result = RocheResult(primaryIndex, ratio);
           }
+        }
+        continue;
+      }
+
+      for (var child = 0u; child < 4u; child += 1u) {
+        if (stackSize < 32u) {
+          stack[stackSize] = node.childBase + child;
+          stackSize += 1u;
         }
       }
     }
-
-    if (valid) {
-      if (isActive && index != u32(params.lockedSlot)) { currentBody.velocity += 0.5 * acceleration * params.dt; }
-      kickBodies[index] = currentBody;
-    }
+    return result;
   }
 
   @compute @workgroup_size(${WORKGROUP_SIZE})
@@ -286,16 +871,14 @@ const computeShader = /* wgsl */ `
       storeSigned(HASH_NEXT_OFFSET, index, -1);
       storeSigned(CANDIDATE_OFFSET, index, -1);
       storeSigned(ACCEPTED_OFFSET, index, -1);
+      storeSigned(TIDAL_EVENT_OFFSET, index, -1);
     }
     if (index == 0u) {
       atomicStore(&counters.activeCount, 0u);
       atomicStore(&counters.events, 0u);
       atomicStore(&counters.reservedGrowth, 0u);
       atomicStore(&counters.maxRadiusBits, 0u);
-      atomicStore(&counters.attractorCount, 0u);
     }
-    // Test reference for tiled matching:
-    // var<workgroup> bodyTile; tile += WORKGROUP_SIZE;
   }
 
   @compute @workgroup_size(${WORKGROUP_SIZE})
@@ -309,6 +892,71 @@ const computeShader = /* wgsl */ `
     let bucket = hashCell(cellFor(body.position));
     let previous = atomicExchange(&metadata[HASH_HEAD_OFFSET + bucket], index);
     storeSigned(HASH_NEXT_OFFSET, index, bitcast<i32>(previous));
+  }
+
+  @compute @workgroup_size(${WORKGROUP_SIZE})
+  fn detectRocheEvents(@builtin(global_invocation_id) id: vec3<u32>) {
+    let index = id.x;
+    if (index >= BODY_COUNT) { return; }
+    var body = kickBodies[index];
+    if (body.mass <= 0.0) { return; }
+
+    let roche = strongestRochePrimary(body, index);
+    if (roche.primaryIndex >= BODY_COUNT || roche.ratio <= 1.0) {
+      return;
+    }
+
+    let primary = driftBodies[roche.primaryIndex];
+    let separationVector = primary.position - body.position;
+    var separation = length(separationVector);
+    // Physical surface contact has priority over tidal disruption. The
+    // collision pass will accrete the smaller body unconditionally.
+    if (separation < primary.radius) {
+      return;
+    }
+
+    body.tidalLockUntil = max(body.tidalLockUntil, params.time + ROCHE_LOCK_TIME);
+    kickBodies[index] = body;
+
+    let compactBody = bodyDensity(body) >= COMPACT_DENSITY_ENTER;
+    let protectionActive = params.time < body.fragmentation.x;
+    let generation = body.fragmentation.y;
+    let massLimitedCount = u32(floor(body.mass / MIN_FRAGMENT_MASS));
+    if (compactBody || protectionActive || generation >= MAX_FRAGMENT_GENERATION || massLimitedCount < 3u) {
+      return;
+    }
+
+    separation = max(separation, primary.radius + body.radius);
+    let normal = safeDirection(separationVector, vec2<f32>(1.0, 0.0));
+    let shearRate = sqrt(G * primary.mass / max(separation * separation * separation, 0.0001));
+    let tidalSpeed = shearRate * body.radius * clamp(roche.ratio, 1.0, 3.0);
+    let severityCount = u32(floor(3.0 + (roche.ratio - 1.0) * 5.0 + sqrt(body.mass / MIN_FRAGMENT_MASS)));
+    let count = min(min(MAX_FRAGMENTS, massLimitedCount), max(3u, severityCount));
+    let freeSlots = BODY_COUNT - atomicLoad(&counters.activeCount);
+    if (!reserveGrowth(count - 1u, freeSlots)) { return; }
+
+    let eventIndex = atomicAdd(&counters.events, 1u);
+    if (eventIndex >= MAX_FRAGMENT_EVENTS) { return; }
+    fragmentEvents[eventIndex] = FragmentEvent(
+      body.position,
+      body.velocity,
+      normal,
+      body.mass,
+      0.0,
+      0.5 * body.mass * tidalSpeed * tidalSpeed,
+      tidalSpeed,
+      tidalSpeed,
+      1.0,
+      momentOfInertia(body) * body.spin,
+      body.tidalLockUntil,
+      count,
+      hash32((index * 73856093u) ^ (roche.primaryIndex * 19349663u) ^ u32(params.time * 1000.0)),
+      generation,
+      1u,
+      shearRate,
+      0.0,
+    );
+    storeSigned(TIDAL_EVENT_OFFSET, index, i32(eventIndex));
   }
 
   fn deepestPartner(index: u32, sourceBody: Body) -> i32 {
@@ -359,19 +1007,26 @@ const computeShader = /* wgsl */ `
   fn detectFragmentEvents(@builtin(global_invocation_id) id: vec3<u32>) {
     let index = id.x;
     if (index >= BODY_COUNT) { return; }
+    if (loadSigned(TIDAL_EVENT_OFFSET, index) >= 0) { return; }
     let partnerValue = loadSigned(CANDIDATE_OFFSET, index);
     if (partnerValue < 0) { return; }
     let partner = u32(partnerValue);
     if (partner <= index || loadSigned(CANDIDATE_OFFSET, partner) != i32(index)) { return; }
+    if (loadSigned(TIDAL_EVENT_OFFSET, partner) >= 0) { return; }
 
     let sourceBody = kickBodies[index];
     let other = kickBodies[partner];
+    let centerDistance = length(other.position - sourceBody.position);
+    let surfaceContainment =
+      (other.mass > sourceBody.mass && centerDistance < other.radius)
+      || (sourceBody.mass > other.mass && centerDistance < sourceBody.radius);
+    if (surfaceContainment) { return; }
     let compactCollision = max(bodyDensity(sourceBody), bodyDensity(other)) >= COMPACT_DENSITY_ENTER;
     if (compactCollision) { return; }
-    let genA = select(0.0, sourceBody.previous.y, params.time < sourceBody.previous.x);
-    let genB = select(0.0, other.previous.y, params.time < other.previous.x);
+    let genA = sourceBody.fragmentation.y;
+    let genB = other.fragmentation.y;
     let generation = max(genA, genB);
-    let protectionActive = params.time < max(sourceBody.previous.x, other.previous.x);
+    let protectionActive = params.time < max(sourceBody.fragmentation.x, other.fragmentation.x);
     if (protectionActive || generation >= MAX_FRAGMENT_GENERATION) { return; }
     let normal = safeDirection(other.position - sourceBody.position, vec2<f32>(1.0, 0.0));
     let tangent = vec2<f32>(-normal.y, normal.x);
@@ -381,10 +1036,13 @@ const computeShader = /* wgsl */ `
     let reducedMass = sourceBody.mass * other.mass / totalMass;
     let normalSpeed = max(0.0, -dot(relativeVelocity, normal));
     let tangentSpeed = dot(relativeVelocity, tangent);
-    // Tangential motion couples less efficiently than the closing component.
-    let energy = 0.5 * reducedMass * (normalSpeed * normalSpeed + 0.35 * tangentSpeed * tangentSpeed);
+    let center = (sourceBody.position * sourceBody.mass + other.position * other.mass) / totalMass;
+    let centerVelocity = (sourceBody.velocity * sourceBody.mass + other.velocity * other.mass) / totalMass;
+    let centerOfMassEnergy = relativeKineticEnergy(sourceBody, other);
+    let normalCoupling = normalSpeed * normalSpeed / max(relativeSpeed * relativeSpeed, 0.0001);
+    let energy = centerOfMassEnergy * mix(0.35, 1.0, normalCoupling);
     let obliquity = abs(tangentSpeed) / max(relativeSpeed, 0.0001);
-    if (normalSpeed < FRAGMENT_SPEED * 0.05 || energy / totalMass < disruptionThreshold(totalMass)) { return; }
+    if (normalSpeed <= 0.0 || energy / totalMass < disruptionThreshold(totalMass)) { return; }
 
     let impactImpulse = reducedMass * normalSpeed;
     let requestedCount = fragmentCount(energy, totalMass, reducedMass, impactImpulse, obliquity);
@@ -398,8 +1056,8 @@ const computeShader = /* wgsl */ `
     let eventIndex = atomicAdd(&counters.events, 1u);
     if (eventIndex >= MAX_FRAGMENT_EVENTS) { return; }
     fragmentEvents[eventIndex] = FragmentEvent(
-      (sourceBody.position * sourceBody.mass + other.position * other.mass) / totalMass,
-      (sourceBody.velocity * sourceBody.mass + other.velocity * other.mass) / totalMass,
+      center,
+      centerVelocity,
       normal,
       sourceBody.mass,
       other.mass,
@@ -407,10 +1065,14 @@ const computeShader = /* wgsl */ `
       normalSpeed,
       tangentSpeed,
       obliquity,
+      pairAngularMomentum(sourceBody, other, center, centerVelocity),
+      max(sourceBody.tidalLockUntil, other.tidalLockUntil),
       count,
       hash32((index * 73856093u) ^ (partner * 19349663u) ^ u32(params.time * 1000.0)),
       generation,
       0u,
+      0.0,
+      0.0,
     );
     storeSigned(ACCEPTED_OFFSET, index, i32(partner));
     storeSigned(ACCEPTED_OFFSET, partner, i32(index));
@@ -421,6 +1083,10 @@ const computeShader = /* wgsl */ `
     let index = id.x;
     if (index >= BODY_COUNT) { return; }
     var sourceBody = kickBodies[index];
+    if (loadSigned(TIDAL_EVENT_OFFSET, index) >= 0) {
+      outputBodies[index] = inactiveBody();
+      return;
+    }
     let partnerValue = loadSigned(CANDIDATE_OFFSET, index);
     if (sourceBody.mass <= 0.0 || partnerValue < 0) {
       outputBodies[index] = sourceBody;
@@ -431,66 +1097,107 @@ const computeShader = /* wgsl */ `
       outputBodies[index] = sourceBody;
       return;
     }
+    if (loadSigned(TIDAL_EVENT_OFFSET, partner) >= 0) {
+      outputBodies[index] = sourceBody;
+      return;
+    }
     let other = kickBodies[partner];
     if (loadSigned(ACCEPTED_OFFSET, index) == i32(partner)) {
       outputBodies[index] = inactiveBody();
       return;
     }
 
-    let ratio = max(sourceBody.mass, other.mass) / min(sourceBody.mass, other.mass);
-    let relativeVelocity = other.velocity - sourceBody.velocity;
-    let normal = safeDirection(other.position - sourceBody.position, vec2<f32>(1.0, 0.0));
+    let delta = other.position - sourceBody.position;
+    let fallback = select(vec2<f32>(-1.0, 0.0), vec2<f32>(1.0, 0.0), index < partner);
+    let normal = safeDirection(delta, fallback);
     let tangent = vec2<f32>(-normal.y, normal.x);
+    let distance = max(length(delta), 0.001);
     let totalMass = sourceBody.mass + other.mass;
     let reducedMass = sourceBody.mass * other.mass / totalMass;
-    let normalSpeed = max(0.0, -dot(relativeVelocity, normal));
-    let tangentSpeed = dot(relativeVelocity, tangent);
-    let coupledEnergy = 0.5 * reducedMass * (normalSpeed * normalSpeed + 0.35 * tangentSpeed * tangentSpeed);
-    let disruptive = normalSpeed >= FRAGMENT_SPEED * 0.05
-      && coupledEnergy / totalMass >= disruptionThreshold(totalMass);
-    let protectionActive = params.time < max(sourceBody.previous.x, other.previous.x);
-    let genA = select(0.0, sourceBody.previous.y, params.time < sourceBody.previous.x);
-    let genB = select(0.0, other.previous.y, params.time < other.previous.x);
+    let center = (sourceBody.position * sourceBody.mass + other.position * other.mass) / totalMass;
+    let centerVelocity = (sourceBody.velocity * sourceBody.mass + other.velocity * other.mass) / totalMass;
+    let relativeVelocity = other.velocity - sourceBody.velocity;
+    let contactRelativeVelocity = relativeVelocity
+      - tangent * (sourceBody.spin * sourceBody.radius + other.spin * other.radius);
+    let normalContactVelocity = dot(contactRelativeVelocity, normal);
+    let tangentContactVelocity = dot(contactRelativeVelocity, tangent);
+    let centerOfMassEnergy = relativeKineticEnergy(sourceBody, other);
+    let bindingMagnitude = G * sourceBody.mass * other.mass / distance;
+    let postImpactEnergy = 0.5 * reducedMass * (
+      NORMAL_RESTITUTION * NORMAL_RESTITUTION * normalContactVelocity * normalContactVelocity
+      + TANGENTIAL_RESTITUTION * TANGENTIAL_RESTITUTION * tangentContactVelocity * tangentContactVelocity
+    );
+    let gravitationallyBound = postImpactEnergy - bindingMagnitude < 0.0;
+    let lowEnergyImpact = centerOfMassEnergy <= bindingMagnitude * MERGE_BINDING_FRACTION;
+    let tidalBlocked = params.time < max(sourceBody.tidalLockUntil, other.tidalLockUntil);
+    let protectionActive = params.time < max(sourceBody.fragmentation.x, other.fragmentation.x);
+    let genA = sourceBody.fragmentation.y;
+    let genB = other.fragmentation.y;
     let generation = max(genA, genB);
-    let unresolvedCollision = min(sourceBody.mass, other.mass) < MIN_FRAGMENT_MASS * 1.5;
     let compactCollision = max(bodyDensity(sourceBody), bodyDensity(other)) >= COMPACT_DENSITY_ENTER;
-    var survivor = sourceBody.mass > other.mass || (abs(sourceBody.mass - other.mass) < 0.0001 && index < partner);
-    if (index == u32(params.lockedSlot)) {
-      survivor = true;
-    } else if (partner == u32(params.lockedSlot)) {
-      survivor = false;
+    let sourceInsideOther = other.mass > sourceBody.mass && distance <= (other.radius + sourceBody.radius);
+    let otherInsideSource = sourceBody.mass > other.mass && distance <= (sourceBody.radius + other.radius);
+    let surfaceAccretion = sourceInsideOther || otherInsideSource;
+    let canMerge = !tidalBlocked
+      && !protectionActive
+      && (gravitationallyBound && (lowEnergyImpact || compactCollision));
+
+    var survivor = select(sourceInsideOther, otherInsideSource, surfaceAccretion);
+    if (!surfaceAccretion) {
+      survivor = sourceBody.mass > other.mass || (abs(sourceBody.mass - other.mass) < 0.0001 && index < partner);
+      if (index == u32(params.lockedSlot)) {
+        survivor = true;
+      } else if (partner == u32(params.lockedSlot)) {
+        survivor = false;
+      }
     }
-    if (ratio >= MERGE_RATIO || compactCollision || disruptive || protectionActive || generation >= MAX_FRAGMENT_GENERATION || unresolvedCollision) {
+
+    if (surfaceAccretion || canMerge) {
       if (!survivor) {
         outputBodies[index] = inactiveBody();
         return;
       }
+      let nextRadius = mergedRadius(sourceBody, other, totalMass);
+      let totalAngularMomentum = pairAngularMomentum(sourceBody, other, center, centerVelocity);
+      let mergedGeneration = (sourceBody.mass * genA + other.mass * genB) / totalMass;
       if (index != u32(params.lockedSlot)) {
-        sourceBody.position = (sourceBody.position * sourceBody.mass + other.position * other.mass) / totalMass;
-        sourceBody.velocity = (sourceBody.velocity * sourceBody.mass + other.velocity * other.mass) / totalMass;
+        sourceBody.position = center;
+        sourceBody.velocity = centerVelocity;
       }
       sourceBody.mass = totalMass;
-      sourceBody.radius = mergedRadius(sourceBody, other, totalMass);
-      let mergedGeneration = (sourceBody.mass * genA + other.mass * genB) / totalMass;
-      sourceBody.previous = vec2<f32>(
-        max(sourceBody.previous.x, other.previous.x),
+      sourceBody.radius = nextRadius;
+      sourceBody.spin = totalAngularMomentum / max(momentOfInertia(sourceBody), 0.0001);
+      sourceBody.tidalLockUntil = max(sourceBody.tidalLockUntil, other.tidalLockUntil);
+      sourceBody.fragmentation = vec2<f32>(
+        max(sourceBody.fragmentation.x, other.fragmentation.x),
         mergedGeneration,
       );
       outputBodies[index] = sourceBody;
       return;
     }
 
-    let delta = other.position - sourceBody.position;
-    let fallback = select(vec2<f32>(-1.0, 0.0), vec2<f32>(1.0, 0.0), index < partner);
-    let contactNormal = safeDirection(delta, fallback);
-    let distance = max(length(delta), 0.001);
     let overlap = max(0.0, sourceBody.radius + other.radius - distance);
     if (index != u32(params.lockedSlot)) {
-      sourceBody.position -= contactNormal * overlap * (other.mass / (sourceBody.mass + other.mass)) * POSITION_CORRECTION;
-      let signedNormalSpeed = dot(relativeVelocity, contactNormal);
-      if (signedNormalSpeed < 0.0) {
-        let impulse = -(1.0 + RESTITUTION) * signedNormalSpeed / (1.0 / sourceBody.mass + 1.0 / other.mass);
-        sourceBody.velocity -= contactNormal * impulse / sourceBody.mass;
+      sourceBody.position -= normal * overlap * (other.mass / totalMass) * POSITION_CORRECTION;
+      if (normalContactVelocity < 0.0) {
+        let inverseMassSum = 1.0 / sourceBody.mass + 1.0 / other.mass;
+        let normalImpulse = -(1.0 + NORMAL_RESTITUTION) * normalContactVelocity / inverseMassSum;
+        let sourceInertia = max(momentOfInertia(sourceBody), 0.0001);
+        let otherInertia = max(momentOfInertia(other), 0.0001);
+        let tangentDenominator = inverseMassSum
+          + sourceBody.radius * sourceBody.radius / sourceInertia
+          + other.radius * other.radius / otherInertia;
+        let unconstrainedTangentImpulse =
+          -(1.0 + TANGENTIAL_RESTITUTION) * tangentContactVelocity / tangentDenominator;
+        let maximumTangentImpulse = CONTACT_FRICTION * normalImpulse;
+        let tangentImpulse = clamp(
+          unconstrainedTangentImpulse,
+          -maximumTangentImpulse,
+          maximumTangentImpulse,
+        );
+        let impulse = normal * normalImpulse + tangent * tangentImpulse;
+        sourceBody.velocity -= impulse / sourceBody.mass;
+        sourceBody.spin -= sourceBody.radius * tangentImpulse / sourceInertia;
       }
     }
     outputBodies[index] = sourceBody;
@@ -524,11 +1231,19 @@ const computeShader = /* wgsl */ `
     let relativeSpeed = sqrt(event.normalSpeed * event.normalSpeed + event.tangentSpeed * event.tangentSpeed);
     let headOn = event.normalSpeed / max(relativeSpeed, 0.0001);
     let tangent = vec2<f32>(-event.normal.y, event.normal.x);
-    let normalScale = 0.55 + 1.2 * headOn;
-    let tangentScale = 0.55 + 1.45 * event.obliquity;
+    let collisionNormalScale = 0.55 + 1.2 * headOn;
+    let collisionTangentScale = 0.55 + 1.45 * event.obliquity;
+    let normalScale = select(collisionNormalScale, 2.8, event.kind == 1u);
+    let tangentScale = select(collisionTangentScale, 0.32, event.kind == 1u);
     let rawDirection = event.normal * cos(angle) * normalScale + tangent * sin(angle) * tangentScale;
     let speedVariation = 0.65 + 0.7 * random01(event.seed ^ (ordinal * 3266489917u) ^ 0x85ebca6bu);
     return safeDirection(rawDirection, event.normal) * speedVariation;
+  }
+
+  fn fragmentMass(event: FragmentEvent, ordinal: u32, weightSum: f32) -> f32 {
+    let totalMass = event.sourceMass + event.otherMass;
+    let distributableMass = max(0.0, totalMass - MIN_FRAGMENT_MASS * f32(event.count));
+    return MIN_FRAGMENT_MASS + distributableMass * fragmentWeight(event, ordinal) / max(weightSum, 0.0001);
   }
 
   @compute @workgroup_size(${WORKGROUP_SIZE})
@@ -555,39 +1270,89 @@ const computeShader = /* wgsl */ `
 
     let totalMass = event.sourceMass + event.otherMass;
     var weightSum = 0.0;
-    var weightedPattern = vec2<f32>(0.0);
     for (var sample = 0u; sample < event.count; sample += 1u) {
-      let sampleWeight = fragmentWeight(event, sample);
-      weightSum += sampleWeight;
-      weightedPattern += fragmentPattern(event, sample) * sampleWeight;
+      weightSum += fragmentWeight(event, sample);
     }
-    let meanPattern = weightedPattern / max(weightSum, 0.0001);
-    let weight = fragmentWeight(event, ordinal);
+
+    var massWeightedPattern = vec2<f32>(0.0);
+    for (var sample = 0u; sample < event.count; sample += 1u) {
+      let sampleMass = fragmentMass(event, sample, weightSum);
+      massWeightedPattern += fragmentPattern(event, sample) * sampleMass;
+    }
+    let meanPattern = massWeightedPattern / max(totalMass, 0.0001);
     let pattern = fragmentPattern(event, ordinal) - meanPattern;
-    let distributableMass = max(0.0, totalMass - MIN_FRAGMENT_MASS * f32(event.count));
-    let mass = MIN_FRAGMENT_MASS + distributableMass * weight / weightSum;
+    let mass = fragmentMass(event, ordinal, weightSum);
     let radius = sqrt(mass / DENSITY);
 
-    var weightedVariance = 0.0;
+    let parentRadius = sqrt(totalMass / DENSITY);
+    let collisionSpread = parentRadius * (1.15 + 0.18 * sqrt(f32(event.count)));
+    let tidalSpread = parentRadius * (0.72 + 0.10 * sqrt(f32(event.count)));
+    let spread = select(collisionSpread, tidalSpread, event.kind == 1u);
+    let positionOffset = pattern * spread;
+
+    var patternEnergyMass = 0.0;
     for (var sample = 0u; sample < event.count; sample += 1u) {
       let centered = fragmentPattern(event, sample) - meanPattern;
-      weightedVariance += fragmentWeight(event, sample) * dot(centered, centered);
+      let sampleMass = fragmentMass(event, sample, weightSum);
+      patternEnergyMass += sampleMass * dot(centered, centered);
     }
-    let patternEnergyMass = totalMass * weightedVariance / max(weightSum, 0.0001);
     let severity = event.energy / max(totalMass * disruptionThreshold(totalMass), 0.0001);
     let ejectaFraction = clamp(0.12 + 0.07 * severity + 0.10 * event.obliquity, 0.12, 0.48);
-    let speedScale = sqrt(2.0 * event.energy * ejectaFraction / max(patternEnergyMass, 0.0001));
-    let parentRadius = sqrt(totalMass / DENSITY);
-    let spread = parentRadius * (1.15 + 0.18 * sqrt(f32(event.count)));
-    // The mass-weighted pattern mean is zero, so both center of mass and
-    // linear momentum remain at the pre-impact barycentric values.
-    let position = event.center + pattern * spread;
-    let velocity = event.centerVelocity + pattern * speedScale;
+    let collisionSpeedScale =
+      sqrt(2.0 * event.energy * ejectaFraction / max(patternEnergyMass, 0.0001));
+    let tangent = perpendicular(event.normal);
+
+    var rawVelocityMean = vec2<f32>(0.0);
+    var rawAngularMomentum = 0.0;
+    var rotationalInertia = 0.0;
+    for (var sample = 0u; sample < event.count; sample += 1u) {
+      let sampleMass = fragmentMass(event, sample, weightSum);
+      let centered = fragmentPattern(event, sample) - meanPattern;
+      let sampleOffset = centered * spread;
+      let radialCoordinate = dot(sampleOffset, event.normal);
+      let collisionVelocity = centered * collisionSpeedScale;
+      let tidalVelocity = tangent * (-1.5 * event.shearRate * radialCoordinate)
+        + event.normal * (0.16 * event.shearRate * radialCoordinate);
+      let rawVelocity = select(collisionVelocity, tidalVelocity, event.kind == 1u);
+      rawVelocityMean += rawVelocity * sampleMass;
+    }
+    rawVelocityMean /= max(totalMass, 0.0001);
+
+    for (var sample = 0u; sample < event.count; sample += 1u) {
+      let sampleMass = fragmentMass(event, sample, weightSum);
+      let sampleRadius = sqrt(sampleMass / DENSITY);
+      let centered = fragmentPattern(event, sample) - meanPattern;
+      let sampleOffset = centered * spread;
+      let radialCoordinate = dot(sampleOffset, event.normal);
+      let collisionVelocity = centered * collisionSpeedScale;
+      let tidalVelocity = tangent * (-1.5 * event.shearRate * radialCoordinate)
+        + event.normal * (0.16 * event.shearRate * radialCoordinate);
+      let centeredRawVelocity =
+        select(collisionVelocity, tidalVelocity, event.kind == 1u) - rawVelocityMean;
+      rawAngularMomentum += cross2(sampleOffset, centeredRawVelocity * sampleMass);
+      rotationalInertia += sampleMass * dot(sampleOffset, sampleOffset)
+        + 0.5 * sampleMass * sampleRadius * sampleRadius;
+    }
+
+    let angularVelocity =
+      (event.angularMomentum - rawAngularMomentum) / max(rotationalInertia, 0.0001);
+    let radialCoordinate = dot(positionOffset, event.normal);
+    let collisionVelocity = pattern * collisionSpeedScale;
+    let tidalVelocity = tangent * (-1.5 * event.shearRate * radialCoordinate)
+      + event.normal * (0.16 * event.shearRate * radialCoordinate);
+    let centeredRawVelocity =
+      select(collisionVelocity, tidalVelocity, event.kind == 1u) - rawVelocityMean;
+    let position = event.center + positionOffset;
+    let velocity = event.centerVelocity
+      + centeredRawVelocity
+      + perpendicular(positionOffset) * angularVelocity;
     outputBodies[claimed] = Body(
       position,
       velocity,
       mass,
       radius,
+      angularVelocity,
+      event.tidalLockUntil,
       vec2<f32>(params.time + FRAGMENT_REARM_TIME, event.generation + 1.0),
     );
   }
@@ -595,9 +1360,15 @@ const computeShader = /* wgsl */ `
 
 const mutationShader = /* wgsl */ `
   const BODY_COUNT: u32 = ${BODY_COUNT}u;
-  const SLOT_STATE_OFFSET: u32 = ${HASH_BUCKET_COUNT + BODY_COUNT * 3}u;
+  const SLOT_STATE_OFFSET: u32 = ${HASH_BUCKET_COUNT + BODY_COUNT * 5}u;
   struct Body {
-    position: vec2<f32>, velocity: vec2<f32>, mass: f32, radius: f32, previous: vec2<f32>,
+    position: vec2<f32>,
+    velocity: vec2<f32>,
+    mass: f32,
+    radius: f32,
+    spin: f32,
+    tidalLockUntil: f32,
+    fragmentation: vec2<f32>,
   };
   struct Mutation { header: vec4<f32>, values: vec4<f32> };
   @group(0) @binding(0) var<storage, read_write> bodies: array<Body>;
@@ -619,6 +1390,8 @@ const mutationShader = /* wgsl */ `
             mutation.values.zw,
             mutation.header.w,
             mutation.header.z,
+            0.0,
+            0.0,
             vec2<f32>(0.0),
           );
           return;
@@ -627,7 +1400,15 @@ const mutationShader = /* wgsl */ `
     } else if (kind == 2u) {
       let slot = u32(mutation.header.y);
       if (slot < BODY_COUNT) {
-        bodies[slot] = Body(vec2<f32>(0.0), vec2<f32>(0.0), 0.0, 0.0, vec2<f32>(0.0));
+        bodies[slot] = Body(
+          vec2<f32>(0.0),
+          vec2<f32>(0.0),
+          0.0,
+          0.0,
+          0.0,
+          0.0,
+          vec2<f32>(0.0),
+        );
         atomicStore(&metadata[SLOT_STATE_OFFSET + slot], 0u);
       }
     } else if (kind == 3u) {
@@ -645,7 +1426,13 @@ const renderShader = /* wgsl */ `
   const GRID_ATTRACTOR_COUNT: u32 = ${GRID_ATTRACTOR_COUNT}u;
   const DENSITY: f32 = ${MASS_DENSITY};
   struct Body {
-    position: vec2<f32>, velocity: vec2<f32>, mass: f32, radius: f32, previous: vec2<f32>,
+    position: vec2<f32>,
+    velocity: vec2<f32>,
+    mass: f32,
+    radius: f32,
+    spin: f32,
+    tidalLockUntil: f32,
+    fragmentation: vec2<f32>,
   };
   struct ViewUniforms {
     view: vec4<f32>,
@@ -808,6 +1595,7 @@ const renderShader = /* wgsl */ `
     out.color = vec3<f32>(0.55, 0.86, 1.0);
     out.selected = 0.0;
     out.bodyVisible = uniforms.preview.w;
+    out.compact = 0.0;
     return out;
   }
 
@@ -951,11 +1739,15 @@ export class GPUEngine {
     );
     this.mutationUniform = this.createBuffer(32, GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST, "mutation");
     this.metadata = this.createBuffer(METADATA_WORDS * 4, GPUBufferUsage.STORAGE, "simulation-metadata");
-    this.fragmentEvents = this.createBuffer(MAX_FRAGMENT_EVENTS * 64, GPUBufferUsage.STORAGE, "fragment-events");
-    this.counters = this.createBuffer(
-      16 + 4 + MAX_ATTRACTORS * 4,
+    this.fragmentEvents = this.createBuffer(
+      MAX_FRAGMENT_EVENTS * FRAGMENT_EVENT_BYTES,
       GPUBufferUsage.STORAGE,
-      "counters",
+      "fragment-events",
+    );
+    this.counters = this.createBuffer(
+      TREE_COUNTER_BYTES,
+      GPUBufferUsage.STORAGE,
+      "simulation-counters-and-linear-quadtree",
     );
     this.snapshotBuffer = this.createBuffer(
       BODY_COUNT * BODY_BYTES,
@@ -978,8 +1770,16 @@ export class GPUEngine {
     const computeModule = device.createShaderModule({ code: computeShader, label: "gravity-compute" });
     const computePipelineLayout = device.createPipelineLayout({ bindGroupLayouts: [this.computeLayout] });
     const entries = [
-      "collectAttractors", "integrateDrift", "integrateKick", "clearMetadata", "buildSpatialHash", "selectPartners",
-      "detectFragmentEvents", "resolveCollisions", "syncSlotState", "spawnFragments",
+      "clearTree",
+      "collectCurrentTreeBounds", "countCurrentMortonCodes", "scatterCurrentMortonCodes", "buildCurrentTreeLeaves",
+      "collectDriftTreeBounds", "countDriftMortonCodes", "scatterDriftMortonCodes", "buildDriftTreeLeaves",
+      "prefixTreeBuckets", "buildTreeHierarchy",
+      "clearSurfaceAccretion", "buildCurrentSpatialHash", "detectSurfacePrimaries",
+      "accumulateSurfaceAccretion", "resolveSurfaceAccretion", "syncSurfaceSlotState",
+      "integrateDrift", "integrateKick",
+      "clearMetadata", "buildSpatialHash", "detectRocheEvents", "selectPartners",
+      "detectFragmentEvents", "resolveCollisions",
+      "syncSlotState", "spawnFragments",
     ];
     this.computePipelines = Object.fromEntries(entries.map((entryPoint) => [
       entryPoint,
@@ -1305,11 +2105,14 @@ export class GPUEngine {
     this.flushPendingMutations();
     this.elapsed += dt;
     this.device.queue.writeBuffer(this.simParams, 0, new Float32Array([dt, this.elapsed, lockedSlot, 0]));
-    const bindGroup = this.createComputeBindGroup();
-    const encoder = this.device.createCommandEncoder({ label: "gravity-step" });
     const dispatchBodies = Math.ceil(BODY_COUNT / WORKGROUP_SIZE);
 
-    const run = (name: keyof typeof this.computePipelines, groups: number): void => {
+    const run = (
+      encoder: GPUCommandEncoder,
+      bindGroup: GPUBindGroup,
+      name: keyof typeof this.computePipelines,
+      groups: number,
+    ): void => {
       const pass = encoder.beginComputePass({ label: name });
       pass.setPipeline(this.computePipelines[name]);
       pass.setBindGroup(0, bindGroup);
@@ -1317,16 +2120,63 @@ export class GPUEngine {
       pass.end();
     };
 
-    run("collectAttractors", dispatchBodies);
-    run("integrateDrift", dispatchBodies);
-    run("integrateKick", dispatchBodies);
-    run("clearMetadata", Math.ceil(HASH_BUCKET_COUNT / WORKGROUP_SIZE));
-    run("buildSpatialHash", dispatchBodies);
-    run("selectPartners", dispatchBodies);
-    run("detectFragmentEvents", dispatchBodies);
-    run("resolveCollisions", dispatchBodies);
-    run("syncSlotState", dispatchBodies);
-    run("spawnFragments", Math.ceil(MAX_FRAGMENT_EVENTS * MAX_FRAGMENTS / WORKGROUP_SIZE));
+    const encoder = this.device.createCommandEncoder({ label: "gravity-step-with-surface-accretion" });
+
+    // Resolve bodies that have already crossed a more massive body's physical
+    // surface before building the gravity tree. This prevents an interior
+    // particle from receiving another gravity kick and being ejected through
+    // the opposite side of the primary.
+    const surfaceBindGroup = this.createComputeBindGroup();
+    run(encoder, surfaceBindGroup, "clearSurfaceAccretion", dispatchBodies);
+    run(encoder, surfaceBindGroup, "buildCurrentSpatialHash", dispatchBodies);
+    run(encoder, surfaceBindGroup, "detectSurfacePrimaries", dispatchBodies);
+    run(encoder, surfaceBindGroup, "accumulateSurfaceAccretion", dispatchBodies);
+    run(encoder, surfaceBindGroup, "resolveSurfaceAccretion", dispatchBodies);
+    run(encoder, surfaceBindGroup, "syncSurfaceSlotState", dispatchBodies);
+
+    const preAccretionCurrent = this.currentBodies;
+    this.currentBodies = this.outputBodies;
+    this.outputBodies = preAccretionCurrent;
+
+    const bindGroup = this.createComputeBindGroup();
+    const dispatchTreeLeaves = Math.ceil(TREE_LEAF_COUNT / WORKGROUP_SIZE);
+    const buildGravityTree = (source: "Current" | "Drift"): void => {
+      run(encoder, bindGroup, "clearTree", dispatchTreeLeaves);
+      if (source === "Current") {
+        run(encoder, bindGroup, "collectCurrentTreeBounds", dispatchBodies);
+        run(encoder, bindGroup, "countCurrentMortonCodes", dispatchBodies);
+      } else {
+        run(encoder, bindGroup, "collectDriftTreeBounds", dispatchBodies);
+        run(encoder, bindGroup, "countDriftMortonCodes", dispatchBodies);
+      }
+      run(encoder, bindGroup, "prefixTreeBuckets", 1);
+      if (source === "Current") {
+        run(encoder, bindGroup, "scatterCurrentMortonCodes", dispatchBodies);
+        run(encoder, bindGroup, "buildCurrentTreeLeaves", dispatchTreeLeaves);
+      } else {
+        run(encoder, bindGroup, "scatterDriftMortonCodes", dispatchBodies);
+        run(encoder, bindGroup, "buildDriftTreeLeaves", dispatchTreeLeaves);
+      }
+      run(encoder, bindGroup, "buildTreeHierarchy", 1);
+    };
+
+    buildGravityTree("Current");
+    run(encoder, bindGroup, "integrateDrift", dispatchBodies);
+    buildGravityTree("Drift");
+    run(encoder, bindGroup, "integrateKick", dispatchBodies);
+    run(encoder, bindGroup, "clearMetadata", dispatchBodies);
+    run(encoder, bindGroup, "buildSpatialHash", dispatchBodies);
+    run(encoder, bindGroup, "detectRocheEvents", dispatchBodies);
+    run(encoder, bindGroup, "selectPartners", dispatchBodies);
+    run(encoder, bindGroup, "detectFragmentEvents", dispatchBodies);
+    run(encoder, bindGroup, "resolveCollisions", dispatchBodies);
+    run(encoder, bindGroup, "syncSlotState", dispatchBodies);
+    run(
+      encoder,
+      bindGroup,
+      "spawnFragments",
+      Math.ceil(MAX_FRAGMENT_EVENTS * MAX_FRAGMENTS / WORKGROUP_SIZE),
+    );
     this.device.queue.submit([encoder.finish()]);
 
     const oldCurrent = this.currentBodies;
@@ -1431,6 +2281,8 @@ export class GPUEngine {
           velocity: { x: vx, y: vy },
           mass,
           radius: values[offset + 5],
+          spin: values[offset + 6],
+          tidalLocked: values[offset + 7] > this.elapsed,
           hue: Math.round(15 + heat * 200),
         });
       }
